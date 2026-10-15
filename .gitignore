@@ -1,0 +1,28 @@
+# Credentials, private profiles and local data
+.env
+.env.*
+!.env.example
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.log
+profiles/
+credentials/
+*.pem
+*.key
+
+# Build artifacts
+build/
+bin/
+dist/
+CMakeFiles/
+CMakeCache.txt
+.cache/
+
+# Local tooling
+.hermes/
+.idea/
+.vscode/
+.DS_Store
