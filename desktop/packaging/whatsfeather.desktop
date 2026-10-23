@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=WhatsFeather
+Comment=Native messaging client
+Exec=whatsfeather
+Icon=whatsfeather
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+Keywords=WhatsApp;Chat;Messages;
+StartupNotify=true
+StartupWMClass=whatsfeather

@@ -1,0 +1,128 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-gates-and-go:
+    name: Offline release gates and Go checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: backend/go.mod
+          cache: true
+          cache-dependency-path: backend/go.sum
+
+      - name: Test release gate and inventory
+        run: |
+          python3 -m unittest discover -s tests -p 'test_release_checks.py' -v
+          python3 -m unittest discover -s tests -p 'test_dependency_inventory.py' -v
+
+      - name: Run prealpha security/dependency gate
+        run: python3 scripts/check-release.py --mode verify
+
+      - name: Validate offline dependency inventory
+        run: python3 scripts/dependency-inventory.py --check --format text
+
+      - name: Download pinned Go modules for subsequent offline checks
+        working-directory: backend
+        run: go mod download
+
+      - name: Scan Go source against public vulnerability advisories
+        working-directory: backend
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      - name: Verify cached Go module contents offline
+        working-directory: backend
+        env:
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+        run: go mod verify
+
+      - name: Run Go tests and vet offline
+        working-directory: backend
+        env:
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+        run: |
+          go test -race ./...
+          go vet ./...
+
+  native-qt:
+    name: Native Qt ${{ matrix.qt-version }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # Qt 6.5.3 is the declared minimum-compatible baseline; 6.8.3 is the
+        # second explicit LTS-era compatibility point. Both are real packages.
+        qt-version: ['6.5.3', '6.8.3']
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Install native build/runtime prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 ffmpeg libpulse0
+
+      - name: Install Qt baseline and required modules
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
+        with:
+          version: ${{ matrix.qt-version }}
+          host: linux
+          target: desktop
+          arch: gcc_64
+          modules: 'qtmultimedia qtimageformats'
+          cache: true
+
+      - name: Download pinned Go modules
+        working-directory: backend
+        run: go mod download
+
+      - name: Run canonical build and synthetic acceptance
+        env:
+          TMPDIR: ${{ runner.temp }}
+          QT_QPA_PLATFORM: offscreen
+          QT_QUICK_BACKEND: software
+          QT_FORCE_STDERR_LOGGING: '1'
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+          BUILD_JOBS: '2'
+        run: ./scripts/verify.sh
