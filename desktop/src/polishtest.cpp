@@ -11,6 +11,7 @@
 #include <QJSValue>
 #include <QQuickItem>
 #include <QImageReader>
+#include <QJsonDocument>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <QQuickWindow>
@@ -323,6 +324,9 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
   struct State {
     int stage = 0;
     int ticks = 0;
+    int audioLabelWaitTicks = 0;
+    QString audioLabelWaitRecord;
+    QString audioLabelWaitDiagnostic;
     QString mediaTarget;
     QString mediaChat;
     QStringList mediaRpcMethods;
@@ -350,7 +354,13 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
       return label ? label->property("text").toString() : QString();
     };
     if (++state->ticks > 240) {
-      fail(state->stage == 20 ? "timed out waiting for rendered timeline fixtures" : "timed out");
+      if (state->stage == 20 && !state->audioLabelWaitDiagnostic.isEmpty()) {
+        fail(QStringLiteral("timed out waiting for rendered timeline fixtures: %1")
+                 .arg(state->audioLabelWaitRecord + QStringLiteral(" ") +
+                      state->audioLabelWaitDiagnostic));
+      } else {
+        fail(state->stage == 20 ? "timed out waiting for rendered timeline fixtures" : "timed out");
+      }
       return;
     }
     if (!c.demo()) { fail("non-demo controller"); return; }
@@ -458,11 +468,18 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
                                attachment.value("is_voice_note").toBool() == isVoiceNote &&
                                attachment.value("state").toString() == (ready ? QStringLiteral("ready") : QStringLiteral("remote")) &&
                                (!ready || attachment.value("url").toString().startsWith(QStringLiteral("file:///")));
+            const auto expectedLabel = isVoiceNote ? QStringLiteral("Voice note") : QStringLiteral("Audio");
+            const auto expectedState = ready ? QString::number(attachment.value("duration").toInt()) + QStringLiteral(" s") : QStringLiteral("Not downloaded");
+            QStringList renderedLabels;
             bool labelFound = false;
             std::function<void(QQuickItem *)> findAudioLabel = [&](QQuickItem *node) {
               const auto text = node->property("text").toString();
-              const auto expectedLabel = isVoiceNote ? QStringLiteral("Voice note") : QStringLiteral("Audio");
-              const auto expectedState = ready ? QString::number(attachment.value("duration").toInt()) + QStringLiteral(" s") : QStringLiteral("Not downloaded");
+              if (!text.isEmpty()) {
+                renderedLabels.append(QStringLiteral("%1 [%2] %3")
+                                          .arg(node->objectName().isEmpty() ? QStringLiteral("<unnamed>") : node->objectName(),
+                                               node->isVisible() ? QStringLiteral("visible") : QStringLiteral("hidden"),
+                                               text.left(80)));
+              }
               if (node->isVisible() && text.contains(expectedLabel) &&
                   text.contains(expectedState, Qt::CaseInsensitive)) {
                 labelFound = true;
@@ -470,10 +487,32 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
               for (auto *child : node->childItems()) findAudioLabel(child);
             };
             findAudioLabel(item);
-            if (!typed || !labelFound) {
-              fail(QStringLiteral("audio identity label mismatch: voice=%1 typed=%2 label=%3")
-                       .arg(isVoiceNote).arg(typed).arg(labelFound));
+            if (!typed) {
+              fail(QStringLiteral("audio identity label mismatch: voice=%1 typed=%2 label=%3 expected=%4/%5 rendered=%6")
+                       .arg(isVoiceNote).arg(typed).arg(labelFound)
+                       .arg(expectedLabel, expectedState, renderedLabels.join(QStringLiteral(" | "))));
               return;
+            }
+            if (!labelFound) {
+              if (state->audioLabelWaitRecord != recordID) {
+                state->audioLabelWaitRecord = recordID;
+                state->audioLabelWaitTicks = 0;
+              }
+              ++state->audioLabelWaitTicks;
+              state->audioLabelWaitDiagnostic =
+                  QStringLiteral("voice=%1 expected=%2/%3 rendered=%4")
+                      .arg(isVoiceNote)
+                      .arg(expectedLabel, expectedState,
+                           renderedLabels.join(QStringLiteral(" | ")));
+              return;
+            }
+            if (state->audioLabelWaitRecord == recordID &&
+                state->audioLabelWaitTicks > 0) {
+              qInfo() << "Native product audio label settled after"
+                      << state->audioLabelWaitTicks << "polls for" << recordID;
+              state->audioLabelWaitTicks = 0;
+              state->audioLabelWaitRecord.clear();
+              state->audioLabelWaitDiagnostic.clear();
             }
             if (isVoiceNote) ++testedVoiceNote;
             else ++testedAudio;
@@ -3567,14 +3606,19 @@ void runPolishTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
           auto *second = namedBelow(bubble, "albumPreviewImage1");
           auto *body = namedBelow(bubble, "messageBody");
           auto *localOnly = namedBelow(bubble, "albumLocalOnlyTimelineDisclosure");
+          const int firstStatus = first ? first->property("status").toInt() : -1;
+          const int secondStatus = second ? second->property("status").toInt() : -1;
+          // QML Image.status=Loading (2) is transient; keep polling within the
+          // existing bounded stage timeout before treating it as a failed preview.
+          if (firstStatus == 2 || secondStatus == 2)
+            return;
           if (albumRows != 1 || id.isEmpty() ||
               albumMessage.value("chat_id").toString() != c.selectedId() ||
               albumMessage.value("body").toString() != QStringLiteral("Synthetic album caption") ||
               albumMessage.value("status").toString() != "demo_sent" ||
               items.size() != 2 || !grid || !grid->isVisible() ||
               grid->property("albumItemCount").toInt() != 2 ||
-              !first || !second || first->property("status").toInt() != 1 ||
-              second->property("status").toInt() != 1 || !body ||
+              !first || !second || firstStatus != 1 || secondStatus != 1 || !body ||
               !body->property("text").toString().contains(QStringLiteral("Synthetic album caption")) ||
               !localOnly || !localOnly->property("visible").toBool() ||
               !localOnly->property("text").toString().contains("not sent to WhatsApp")) {
@@ -3583,8 +3627,8 @@ void runPolishTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
                      .arg(items.size())
                      .arg(grid && grid->isVisible())
                      .arg(grid ? grid->property("albumItemCount").toInt() : -1)
-                     .arg(first ? first->property("status").toInt() : -1)
-                     .arg(second ? second->property("status").toInt() : -1)
+                     .arg(firstStatus)
+                     .arg(secondStatus)
                      .arg(body && body->property("text").toString().contains(QStringLiteral("Synthetic album caption")))
                      .arg(localOnly && localOnly->property("visible").toBool() &&
                           localOnly->property("text").toString().contains("not sent to WhatsApp")));

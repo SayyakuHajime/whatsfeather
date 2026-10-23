@@ -13,6 +13,7 @@ import (
 )
 
 func TestGIFToMP4ConversionProducesAnimatedPlaybackEnvelope(t *testing.T) {
+	requireVideoTools(t)
 	var src bytes.Buffer
 	pal := color.Palette{color.Black, color.White}
 	g := &gif.GIF{}

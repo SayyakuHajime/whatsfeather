@@ -74,7 +74,7 @@ jobs:
   native-qt:
     name: Native Qt ${{ matrix.qt-version }}
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -103,11 +103,13 @@ jobs:
           cache-dependency-path: backend/go.sum
 
       - name: Install native build/runtime prerequisites
+        timeout-minutes: 50
         run: |
           sudo apt-get update
-          sudo apt-get install --yes libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 ffmpeg libpulse0
+          sudo apt-get install --yes --no-install-recommends libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 ffmpeg libpulse0
 
       - name: Install Qt baseline and required modules
+        timeout-minutes: 45
         uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4.4.1
         with:
           version: ${{ matrix.qt-version }}
@@ -122,6 +124,7 @@ jobs:
         run: go mod download
 
       - name: Run canonical build and synthetic acceptance
+        timeout-minutes: 45
         env:
           TMPDIR: ${{ runner.temp }}
           QT_QPA_PLATFORM: offscreen

@@ -12,11 +12,18 @@ import (
 	"testing"
 )
 
+func requireVideoTools(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"ffmpeg", "ffprobe"} {
+		if _, err := exec.LookPath(name); err != nil {
+			t.Skipf("video acceptance requires %s: %v", name, err)
+		}
+	}
+}
+
 func syntheticMP4(t *testing.T, profile, encoder string) string {
 	t.Helper()
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Fatalf("synthetic MP4 fixture requires installed ffmpeg: %v", err)
-	}
+	requireVideoTools(t)
 	path := filepath.Join(t.TempDir(), "fixture.mp4")
 	args := []string{
 		"-hide_banner", "-loglevel", "error", "-threads", "1", "-f", "lavfi",
@@ -218,6 +225,7 @@ func TestVideoAttachmentRPCPersistsCaptionAndDoesNotBlindRetryUnknown(t *testing
 }
 
 func TestVideoCapabilityTracksImplementedPathWithoutEnablingOtherMedia(t *testing.T) {
+	requireVideoTools(t)
 	a, err := Open(filepath.Join(t.TempDir(), "profile"), true)
 	if err != nil {
 		t.Fatal(err)

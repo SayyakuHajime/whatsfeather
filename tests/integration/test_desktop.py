@@ -180,6 +180,7 @@ class NativeDesktop(unittest.TestCase):
                 image = capture / name
                 self.assertTrue(image.exists(), name)
                 self.assertEqual(image.read_bytes()[:8], bytes([137, 80, 78, 71, 13, 10, 26, 10]))
+            print("Native album integration PASS: one durable local album row, two ready previews, private captures")
 
     def test_polish_probe_rejects_external_socket_before_connecting(self):
         with tempfile.TemporaryDirectory(prefix="wf-polish-socket-") as temp:
