@@ -39,6 +39,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_release_checks.py' -v
           python3 -m unittest discover -s tests -p 'test_dependency_inventory.py' -v
+          python3 -m unittest discover -s tests -p 'test_workflow_configuration.py' -v
 
       - name: Run prealpha security/dependency gate
         run: python3 scripts/check-release.py --mode verify
@@ -79,7 +80,11 @@ jobs:
       matrix:
         # Qt 6.5.3 is the declared minimum-compatible baseline; 6.8.3 is the
         # second explicit LTS-era compatibility point. Both are real packages.
-        qt-version: ['6.5.3', '6.8.3']
+        include:
+          - qt-version: '6.5.3'
+            qt-arch: gcc_64
+          - qt-version: '6.8.3'
+            qt-arch: linux_gcc_64
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -108,7 +113,7 @@ jobs:
           version: ${{ matrix.qt-version }}
           host: linux
           target: desktop
-          arch: gcc_64
+          arch: ${{ matrix.qt-arch }}
           modules: 'qtmultimedia qtimageformats'
           cache: true
 

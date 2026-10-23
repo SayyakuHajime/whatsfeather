@@ -35,6 +35,7 @@ python3 "$ROOT/tests/test_benchmark_backend.py"
 python3 "$ROOT/tests/test_benchmark_desktop.py"
 python3 "$ROOT/tests/test_release_checks.py"
 python3 "$ROOT/tests/test_dependency_inventory.py"
+python3 "$ROOT/tests/test_workflow_configuration.py"
 python3 "$ROOT/scripts/check-release.py" --mode verify
 python3 "$ROOT/scripts/dependency-inventory.py" --check --format text
 mkdir -p "$WHATSFEATHER_QA_ROOT/config" "$WHATSFEATHER_QA_ROOT/data" "$WHATSFEATHER_QA_ROOT/cache"

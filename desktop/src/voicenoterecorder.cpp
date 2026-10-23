@@ -82,11 +82,11 @@ public:
     connect(m_source.get(), &QAudioSource::stateChanged, this,
             [this](QAudio::State state) {
               if (state == QAudio::StoppedState && m_source &&
-                  m_source->error() != QtAudio::NoError)
+                  m_source->error() != QAudio::NoError)
                 emit failed(QStringLiteral("Microphone capture stopped unexpectedly."));
             });
     m_source->start(destination);
-    if (m_source->error() != QtAudio::NoError) {
+    if (m_source->error() != QAudio::NoError) {
       if (error)
         *error = QStringLiteral("Microphone is unavailable or permission was denied.");
       stop();
