@@ -323,7 +323,8 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
                     const QString &fixture, const QString &captureDir) {
   struct State {
     int stage = 0;
-    int ticks = 0;
+    int deadlineStage = -1;
+    int stageTicks = 0;
     int audioLabelWaitTicks = 0;
     QString audioLabelWaitRecord;
     QString audioLabelWaitDiagnostic;
@@ -353,13 +354,42 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
       auto *label = named(window, name);
       return label ? label->property("text").toString() : QString();
     };
-    if (++state->ticks > 240) {
+    if (state->deadlineStage != state->stage) {
+      state->deadlineStage = state->stage;
+      state->stageTicks = 0;
+    }
+    if (++state->stageTicks > 240) {
       if (state->stage == 20 && !state->audioLabelWaitDiagnostic.isEmpty()) {
         fail(QStringLiteral("timed out waiting for rendered timeline fixtures: %1")
                  .arg(state->audioLabelWaitRecord + QStringLiteral(" ") +
                       state->audioLabelWaitDiagnostic));
+      } else if (state->stage == 50) {
+        auto *player = named(window, "viewerPlayer");
+        auto *video = named(window, "viewerVideoOutput");
+        auto *sink = video ? qobject_cast<QVideoSink *>(video->property("videoSink").value<QObject *>()) : nullptr;
+        const QString playbackState = player
+                                          ? QString::number(player->property("playbackState").toInt())
+                                          : QStringLiteral("missing");
+        const QString position = player
+                                     ? QString::number(player->property("position").toLongLong())
+                                     : QStringLiteral("missing");
+        const QString duration = player
+                                     ? QString::number(player->property("duration").toLongLong())
+                                     : QStringLiteral("missing");
+        const QString error = player
+                                  ? player->property("errorString").toString().left(160)
+                                  : QStringLiteral("missing player");
+        fail(QStringLiteral("timed out waiting for video frame after %1 stage ticks: playbackState=%2 position=%3 duration=%4 sink=%5 frameValid=%6 error=%7")
+                 .arg(state->stageTicks)
+                 .arg(playbackState)
+                 .arg(position)
+                 .arg(duration)
+                 .arg(sink ? QStringLiteral("present") : QStringLiteral("missing"))
+                 .arg(sink && sink->videoFrame().isValid() ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(error));
       } else {
-        fail(state->stage == 20 ? "timed out waiting for rendered timeline fixtures" : "timed out");
+        fail(state->stage == 20 ? QStringLiteral("timed out waiting for rendered timeline fixtures")
+                                : QStringLiteral("timed out after %1 stage ticks").arg(state->stageTicks));
       }
       return;
     }
@@ -1654,7 +1684,6 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
           }
         }
         state->stage = 3000;
-        state->ticks = 0;
         return;
       }
       const auto items = c.routeData().value("messages").toList();

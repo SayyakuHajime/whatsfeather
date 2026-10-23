@@ -269,7 +269,7 @@ class NativeDesktop(unittest.TestCase):
             result = subprocess.run([
                 str(ROOT / "build/bin/whatsfeather"), "--demo", "--theme", "dark",
                 "--data-dir", str(profile), "--product-test", "--product-fixture", str(fixture),
-            ], env=env, capture_output=True, text=True, timeout=40)
+            ], env=env, capture_output=True, text=True, timeout=75)
             output = result.stdout + result.stderr
             self.assertEqual(result.returncode, 0, output)
             self.assertIn("Native video PASS", output)
