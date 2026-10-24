@@ -281,7 +281,8 @@ class NativeDesktop(unittest.TestCase):
                 os.environ, os.environ.get("WHATSFEATHER_VIDEO_QPA_PLATFORM")
             )
             env.update(
-                QT_FORCE_STDERR_LOGGING="1", XDG_RUNTIME_DIR=str(root),
+                QT_FORCE_STDERR_LOGGING="1", QT_FFMPEG_DEBUG="1",
+                QT_LOGGING_RULES="*.ffmpeg.*=true", XDG_RUNTIME_DIR=str(root),
                 XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
                 XDG_CACHE_HOME=str(root / "cache"), WHATSFEATHER_QA_CAPTURE_DIR=str(capture),
             )
@@ -293,6 +294,7 @@ class NativeDesktop(unittest.TestCase):
             output = result.stdout + result.stderr
             self.assertEqual(result.returncode, 0, output)
             self.assertIn("Native video PASS", output)
+            self.assertIn("Native video frame signal diagnostics:", output)
             self.assertIn("Native rendered video SMPTE color bars PASS", output)
             self.assertNotIn("Unsupported image format", output, output)
             self.assertNotIn("Error decoding", output, output)

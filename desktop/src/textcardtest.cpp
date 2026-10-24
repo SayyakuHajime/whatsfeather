@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileDevice>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QHash>
 #include <QImage>
 #include <QJsonArray>

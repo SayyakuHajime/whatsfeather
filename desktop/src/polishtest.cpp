@@ -404,6 +404,13 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
     bool disconnectBoundaryScrolled = false;
     bool compactDisconnectBoundaryScrolled = false;
     bool profileEditPassed = false;
+    int videoFrameEvents = 0;
+    int validVideoFrameEvents = 0;
+    bool lastVideoFrameValid = false;
+    QSize lastVideoFrameSize;
+    qint64 lastVideoFrameStartTime = -1;
+    int lastVideoFramePixelFormat = -1;
+    bool videoFrameSignalLogged = false;
   };
   auto state = std::make_shared<State>();
   auto *timer = new QTimer(&app);
@@ -448,14 +455,33 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         const QString error = player
                                   ? player->property("errorString").toString().left(160)
                                   : QStringLiteral("missing player");
-        fail(QStringLiteral("timed out waiting for video frame after %1 stage ticks: playbackState=%2 position=%3 duration=%4 sink=%5 frameValid=%6 error=%7")
+        const QString mediaStatus = player
+                                        ? QString::number(player->property("mediaStatus").toInt())
+                                        : QStringLiteral("missing");
+        const QString activeVideoTrack = player
+                                             ? QString::number(player->property("activeVideoTrack").toInt())
+                                             : QStringLiteral("missing");
+        const int videoTrackCount = player
+                                        ? player->property("videoTracks").toList().size()
+                                        : -1;
+        fail(QStringLiteral("timed out waiting for video frame after %1 stage ticks: playbackState=%2 position=%3 duration=%4 sink=%5 frameValid=%6 error=%7 videoFrameEvents=%8 validFrameEvents=%9 lastFrameValid=%10 lastFrameSize=%11x%12 lastFrameStart=%13 lastFramePixelFormat=%14 mediaStatus=%15 activeVideoTrack=%16 videoTrackCount=%17")
                  .arg(state->stageTicks)
                  .arg(playbackState)
                  .arg(position)
                  .arg(duration)
                  .arg(sink ? QStringLiteral("present") : QStringLiteral("missing"))
                  .arg(sink && sink->videoFrame().isValid() ? QStringLiteral("yes") : QStringLiteral("no"))
-                 .arg(error));
+                 .arg(error)
+                 .arg(state->videoFrameEvents)
+                 .arg(state->validVideoFrameEvents)
+                 .arg(state->lastVideoFrameValid ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(state->lastVideoFrameSize.width())
+                 .arg(state->lastVideoFrameSize.height())
+                 .arg(state->lastVideoFrameStartTime)
+                 .arg(state->lastVideoFramePixelFormat)
+                 .arg(mediaStatus)
+                 .arg(activeVideoTrack)
+                 .arg(videoTrackCount));
       } else {
         fail(state->stage == 20 ? QStringLiteral("timed out waiting for rendered timeline fixtures")
                                 : QStringLiteral("timed out after %1 stage ticks").arg(state->stageTicks));
@@ -1359,6 +1385,33 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         }
         const qreal displayedRatio = viewer->property("naturalWidth").toReal() / qMax(qreal(1), viewer->property("naturalHeight").toReal());
         if (qAbs(displayedRatio - qreal(96) / 64) > 0.01) { fail("video aspect ratio changed"); return; }
+        auto *sink = qobject_cast<QVideoSink *>(video->property("videoSink").value<QObject *>());
+        if (!sink) { fail("media viewer output has no QVideoSink before playback"); return; }
+        QObject::connect(sink, &QVideoSink::videoFrameChanged, window,
+                         [state](const QVideoFrame &frame) {
+          ++state->videoFrameEvents;
+          state->lastVideoFrameValid = frame.isValid();
+          if (!frame.isValid()) {
+            state->lastVideoFrameSize = QSize();
+            state->lastVideoFrameStartTime = -1;
+            state->lastVideoFramePixelFormat = -1;
+            return;
+          }
+          ++state->validVideoFrameEvents;
+          state->lastVideoFrameSize = frame.size();
+          state->lastVideoFrameStartTime = frame.startTime();
+          state->lastVideoFramePixelFormat = int(frame.pixelFormat());
+          if (!state->videoFrameSignalLogged) {
+            state->videoFrameSignalLogged = true;
+            qInfo().noquote()
+                << QStringLiteral("Native video frame signal diagnostics: valid frame #%1 size=%2x%3 start=%4 pixelFormat=%5")
+                       .arg(state->validVideoFrameEvents)
+                       .arg(frame.size().width())
+                       .arg(frame.size().height())
+                       .arg(frame.startTime())
+                       .arg(int(frame.pixelFormat()));
+          }
+        });
         capture("media-viewer");
         if (!invoke(window, "viewerPlayPause", "clicked")) { fail("video viewer Play control"); return; }
         state->stage = 50;
