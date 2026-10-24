@@ -218,7 +218,7 @@ void runLocationTest(QGuiApplication &app, QQuickWindow *window,
     app.exit(1);
     return;
   }
-  struct State { int ticks = 0; int stage = 0; int unknownWait = 0; };
+  struct State { int ticks = 0; int stage = 0; int unknownWait = 0; bool minimumWindowResizeRequested = false; };
   auto state = std::make_shared<State>();
   auto *timer = new QTimer(&app);
   timer->setInterval(50);
@@ -296,6 +296,21 @@ void runLocationTest(QGuiApplication &app, QQuickWindow *window,
       auto *review = named(window, QStringLiteral("locationReviewButton"));
       if (!dialog || !dialog->property("opened").toBool() || !latitude || !longitude || !caption || !name || !address || !review)
         return;
+      if (!state->minimumWindowResizeRequested) {
+        window->resize(window->width(), 480);
+        state->minimumWindowResizeRequested = true;
+        return;
+      }
+      if (window->height() != 480)
+        return;
+      auto *scroll = named(window, QStringLiteral("locationEntryScroll"));
+      const qreal dialogHeight = dialog->property("height").toReal();
+      const qreal viewportHeight = scroll ? scroll->property("availableHeight").toReal() : 0.0;
+      const qreal contentHeight = scroll ? scroll->property("contentHeight").toReal() : 0.0;
+      if (!scroll || dialogHeight > window->height() - 32 || viewportHeight <= 0 || contentHeight <= viewportHeight) {
+        fail(QStringLiteral("manual location entry must remain bounded and scrollable at minimum window height"));
+        return;
+      }
       latitude->setProperty("text", QStringLiteral("91"));
       longitude->setProperty("text", QStringLiteral("-122.3"));
       caption->setProperty("text", QStringLiteral("Manual <b>caption</b>"));

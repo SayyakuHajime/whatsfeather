@@ -147,13 +147,21 @@ Dialog {
         id: scroll
         clip: true
         contentWidth: width
-        contentHeight: body.implicitHeight + 32
+        contentHeight: previewContent.implicitHeight + 32
         ScrollBar.vertical: ScrollBar { }
-        ColumnLayout {
+        Item {
+            id: previewContent
+            x: 24; y: 4; width: parent.width - 48
+            implicitHeight: body.implicitHeight
+            height: implicitHeight
+        }
+        Column {
             id: body
-            x: 24; y: 4; width: parent.width - 48; spacing: 12
+            parent: previewContent
+            x: 0; y: 0; width: parent.width; height: implicitHeight; spacing: 12
             Rectangle {
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
                 implicitHeight: dialog.albumReview ? Math.min(320, Math.max(150, Math.ceil(dialog.albumItems.length / 2) * 118 + 8)) : dialog.stickerReview ? Math.min(180, Math.max(120, scroll.height * 0.30)) : Math.min(260, Math.max(150, scroll.height * 0.46))
                 radius: 12
                 color: dialog.theme.chrome
@@ -269,7 +277,8 @@ Dialog {
             }
             RowLayout {
                 visible: dialog.videoReview
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
                 spacing: 8
                 ActionButton {
                     theme: dialog.theme
@@ -309,7 +318,8 @@ Dialog {
             RowLayout {
                 objectName: "audioReviewControls"
                 visible: dialog.audioReview
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
                 spacing: 8
                 ActionButton {
                     theme: dialog.theme
@@ -345,9 +355,9 @@ Dialog {
                     Accessible.name: "Audio review position"
                 }
             }
-            Label { textFormat: Text.PlainText; text: dialog.albumReview ? dialog.albumItems.length + " selected photos" : dialog.meta.display_name || dialog.meta.name || "Attachment"; color: dialog.theme.ink; font.weight: Font.DemiBold; elide: Text.ElideMiddle; Layout.fillWidth: true }
+            Label { textFormat: Text.PlainText; text: dialog.albumReview ? dialog.albumItems.length + " selected photos" : dialog.meta.display_name || dialog.meta.name || "Attachment"; color: dialog.theme.ink; font.weight: Font.DemiBold; elide: Text.ElideMiddle; width: parent.width; height: implicitHeight }
             RowLayout {
-                Layout.fillWidth: true; spacing: 16
+                width: parent.width; height: implicitHeight; spacing: 16
                 Label { visible: !dialog.albumReview; text: "Original  " + dialog.sizeLabel(dialog.meta.original_size || dialog.meta.size); color: dialog.theme.muted; font.pixelSize: 12 }
                 Label { text: (dialog.albumReview ? "Album total  " + dialog.sizeLabel(dialog.meta.total_prepared_size) : "To send  " + dialog.sizeLabel(dialog.meta.prepared_size || dialog.meta.size)); color: dialog.theme.ink; font.pixelSize: 12; font.weight: Font.DemiBold }
                 Item { Layout.fillWidth: true }
@@ -355,8 +365,8 @@ Dialog {
             }
             Label {
                 objectName: "attachmentPreparationDescription"
-                text: dialog.albumReview ? "Local demo album · 2–10 still images · up to 20 MiB per prepared image and 50 MiB total" : dialog.videoReview ? dialog.videoDescription() : dialog.audioReview ? dialog.audioDescription() : dialog.stickerReview ? "Static transparent 512 × 512 WebP sticker · up to 100 KB · captions unavailable" : dialog.meta.compressed ? "Optimized photo · the original file is unchanged" : dialog.meta.mode === "document" ? "No recompression · sent as a document" : dialog.animated ? "Animated GIF · sent as a silent video, up to 15 seconds" : "Original quality · the source file is unchanged"
-                color: dialog.theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; Layout.fillWidth: true
+                text: dialog.albumReview ? "Local demo album · 2–10 still images · up to 20 MiB per prepared image and 50 MiB total" : dialog.videoReview ? dialog.videoDescription() : dialog.audioReview ? dialog.audioDescription() : dialog.stickerReview ? "Static transparent 512 × 512 WebP sticker · up to 100 KB · captions unavailable" : dialog.meta.compressed ? "Optimized photo · the original file is unchanged" : dialog.meta.mode === "document" ? "No recompression · the source file is unchanged" : dialog.animated ? "Animated GIF · sent as a silent video, up to 15 seconds" : "Original quality · the source file is unchanged"
+                color: dialog.theme.muted; font.pixelSize: 12; wrapMode: Text.WordWrap; width: parent.width; height: implicitHeight
             }
             Label {
                 objectName: "albumLocalOnlyDisclosure"
@@ -365,12 +375,14 @@ Dialog {
                 text: "Local demo only. Photos stay in this profile; Send album creates one synthetic message locally. Nothing is uploaded to WhatsApp."
                 color: dialog.theme.muted
                 wrapMode: Text.WordWrap
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
             }
             ColumnLayout {
                 objectName: "localStickerPackSaveSection"
                 visible: dialog.stickerReview && dialog.meta.state === "ready"
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
                 spacing: 6
                 Label { text: "Save a local copy to a sticker pack"; color: dialog.theme.ink; font.weight: Font.DemiBold; Layout.fillWidth: true }
                 RowLayout {
@@ -421,12 +433,14 @@ Dialog {
             RowLayout {
                 objectName: "attachmentModeOptions"
                 visible: !dialog.albumReview && !dialog.videoReview && !dialog.audioReview && !dialog.stickerReview
+                width: parent.width
+                height: implicitHeight
                 spacing: 8
                 ActionButton { theme: dialog.theme; objectName: "photoModeButton"; text: "Photo"; primary: dialog.meta.mode === "photo"; enabled: !dialog.preparing && !dialog.animated && !controller.sending; onClicked: controller.changeAttachmentMode("photo") }
                 ActionButton { theme: dialog.theme; objectName: "originalModeButton"; text: "Original"; primary: dialog.meta.mode === "original"; enabled: !dialog.preparing && !controller.sending; onClicked: controller.changeAttachmentMode("original") }
                 ActionButton { theme: dialog.theme; objectName: "documentModeButton"; text: "Document"; primary: dialog.meta.mode === "document"; enabled: !dialog.preparing && !controller.sending; onClicked: controller.changeAttachmentMode("document") }
             }
-            Label { text: dialog.albumReview ? "Album caption" : dialog.stickerReview ? "Caption · unavailable for stickers" : dialog.audioReview ? "Caption · unavailable for audio" : "Caption"; color: dialog.theme.ink; font.weight: Font.DemiBold }
+            Label { text: dialog.albumReview ? "Album caption" : dialog.stickerReview ? "Caption · unavailable for stickers" : dialog.audioReview ? "Caption · unavailable for audio" : "Caption"; color: dialog.theme.ink; font.weight: Font.DemiBold; width: parent.width; height: implicitHeight }
             TextArea {
                 objectName: "attachmentCaption"
                 placeholderText: dialog.albumReview ? "Add a caption for these photos…" : dialog.stickerReview ? "Stickers cannot include captions" : dialog.audioReview ? "Audio attachments cannot include a caption" : "Add a caption…"
@@ -435,8 +449,8 @@ Dialog {
                 readOnly: dialog.stickerReview && !dialog.stickerCaptionPresent
                 color: dialog.theme.ink
                 placeholderTextColor: dialog.theme.muted
-                Layout.fillWidth: true
-                Layout.preferredHeight: 72
+                width: parent.width
+                height: 72
                 wrapMode: TextEdit.Wrap
                 selectByMouse: true
                 padding: 12
@@ -451,7 +465,8 @@ Dialog {
                 text: "Stickers cannot include a caption. Clear this text to send the sticker."
                 color: dialog.theme.danger
                 wrapMode: Text.WordWrap
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
             }
             Label {
                 objectName: "audioCaptionError"
@@ -460,10 +475,11 @@ Dialog {
                 text: "Audio messages cannot include a caption. Clear this draft to continue."
                 color: dialog.theme.danger
                 wrapMode: Text.WordWrap
-                Layout.fillWidth: true
+                width: parent.width
+                height: implicitHeight
             }
-            Label { visible: !!dialog.meta.attribution; textFormat: Text.PlainText; text: dialog.meta.attribution || ""; color: dialog.theme.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            Label { visible: dialog.meta.state === "error"; textFormat: Text.PlainText; text: dialog.meta.error || "The attachment could not be prepared."; color: dialog.theme.danger; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+            Label { visible: !!dialog.meta.attribution; textFormat: Text.PlainText; text: dialog.meta.attribution || ""; color: dialog.theme.muted; font.pixelSize: 11; wrapMode: Text.WordWrap; width: parent.width; height: implicitHeight }
+            Label { visible: dialog.meta.state === "error"; textFormat: Text.PlainText; text: dialog.meta.error || "The attachment could not be prepared."; color: dialog.theme.danger; wrapMode: Text.WordWrap; width: parent.width; height: implicitHeight }
         }
     }
     footer: Item {

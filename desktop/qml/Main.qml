@@ -1183,7 +1183,7 @@ ApplicationWindow {
         Menu {
             title: "React"
             objectName: "messageReactionMenu"
-            visible: app.capabilityAvailable("message.react")
+            enabled: app.capabilityAvailable("message.react")
             MenuItem { objectName: "reactThumbsUpAction"; text: "👍"; Accessible.name: "React with thumbs up"; onTriggered: bridge.performMessageAction("message.react", app.menuMessage, {"reaction": "👍"}) }
             MenuItem { text: "❤️"; Accessible.name: "React with heart"; onTriggered: bridge.performMessageAction("message.react", app.menuMessage, {"reaction": "❤️"}) }
             MenuItem { text: "😂"; Accessible.name: "React with laughter"; onTriggered: bridge.performMessageAction("message.react", app.menuMessage, {"reaction": "😂"}) }
@@ -1720,6 +1720,7 @@ ApplicationWindow {
         objectName: "locationEntryDialog"
         anchors.centerIn: parent
         width: Math.min(480, app.width - 32)
+        height: Math.min(560, app.height - 32)
         modal: true
         title: reviewing ? "Review static location" : "Enter static location"
         padding: 18
@@ -1777,73 +1778,82 @@ ApplicationWindow {
         background: Rectangle { color: app.surface; radius: 14; border.color: app.line }
         onClosed: if (!bridge.locationSending) bridge.clearLocationShare()
 
-        contentItem: ColumnLayout {
-            spacing: 10
-            Label {
-                textFormat: Text.PlainText
-                text: "Coordinates are entered manually. This sends a static location, not live tracking."
-                color: app.muted
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
-            }
+        contentItem: ScrollView {
+            id: locationEntryScroll
+            objectName: "locationEntryScroll"
+            clip: true
+            contentWidth: availableWidth
+
             ColumnLayout {
-                visible: !locationEntryDialog.reviewing
-                Layout.fillWidth: true
-                spacing: 8
-                Label { textFormat: Text.PlainText; text: "Latitude"; color: app.ink }
-                TextField {
-                    id: locationLatitudeInput
-                    objectName: "locationLatitudeInput"
-                    placeholderText: "−90 to 90"
-                    inputMethodHints: Qt.ImhFormattedNumbersOnly
-                    selectByMouse: true
-                    Layout.fillWidth: true
-                    Accessible.name: "Manual location latitude"
-                }
-                Label { textFormat: Text.PlainText; text: "Longitude"; color: app.ink }
-                TextField {
-                    id: locationLongitudeInput
-                    objectName: "locationLongitudeInput"
-                    placeholderText: "−180 to 180"
-                    inputMethodHints: Qt.ImhFormattedNumbersOnly
-                    selectByMouse: true
-                    Layout.fillWidth: true
-                    Accessible.name: "Manual location longitude"
-                }
-                Label { textFormat: Text.PlainText; text: "Caption (optional)"; color: app.ink }
-                TextField { id: locationCaptionInput; objectName: "locationCaptionInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location caption" }
-                Label { textFormat: Text.PlainText; text: "Place name (optional)"; color: app.ink }
-                TextField { id: locationNameInput; objectName: "locationNameInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location name" }
-                Label { textFormat: Text.PlainText; text: "Address (optional)"; color: app.ink }
-                TextField { id: locationAddressInput; objectName: "locationAddressInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location address" }
-            }
-            ColumnLayout {
-                visible: locationEntryDialog.reviewing
-                Layout.fillWidth: true
-                spacing: 6
+                width: locationEntryScroll.availableWidth
+                spacing: 10
+
                 Label {
-                    objectName: "locationReviewCoordinates"
                     textFormat: Text.PlainText
-                    text: "Coordinates · " + Number(locationEntryDialog.reviewedLocation.latitude).toFixed(6) + "°, " + Number(locationEntryDialog.reviewedLocation.longitude).toFixed(6) + "°"
-                    color: app.ink
-                    wrapMode: Text.WrapAnywhere
+                    text: "Coordinates are entered manually. This sends a static location, not live tracking."
+                    color: app.muted
+                    wrapMode: Text.WordWrap
                     Layout.fillWidth: true
                 }
-                Label { visible: String(locationEntryDialog.reviewedLocation.caption || "") !== ""; textFormat: Text.PlainText; text: "Caption"; color: app.muted; font.pixelSize: 11 }
-                Label { objectName: "locationReviewCaption"; visible: String(locationEntryDialog.reviewedLocation.caption || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.caption || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                Label { visible: String(locationEntryDialog.reviewedLocation.name || "") !== ""; textFormat: Text.PlainText; text: "Name"; color: app.muted; font.pixelSize: 11 }
-                Label { objectName: "locationReviewName"; visible: String(locationEntryDialog.reviewedLocation.name || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.name || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-                Label { visible: String(locationEntryDialog.reviewedLocation.address || "") !== ""; textFormat: Text.PlainText; text: "Address"; color: app.muted; font.pixelSize: 11 }
-                Label { objectName: "locationReviewAddress"; visible: String(locationEntryDialog.reviewedLocation.address || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.address || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
-            }
-            Label {
-                objectName: "locationShareError"
-                textFormat: Text.PlainText
-                text: locationEntryDialog.localError !== "" ? locationEntryDialog.localError : bridge.locationShareError
-                visible: locationEntryDialog.localError !== "" || bridge.locationShareError !== ""
-                color: app.danger
-                wrapMode: Text.WordWrap
-                Layout.fillWidth: true
+                ColumnLayout {
+                    visible: !locationEntryDialog.reviewing
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Label { textFormat: Text.PlainText; text: "Latitude"; color: app.ink }
+                    TextField {
+                        id: locationLatitudeInput
+                        objectName: "locationLatitudeInput"
+                        placeholderText: "−90 to 90"
+                        inputMethodHints: Qt.ImhFormattedNumbersOnly
+                        selectByMouse: true
+                        Layout.fillWidth: true
+                        Accessible.name: "Manual location latitude"
+                    }
+                    Label { textFormat: Text.PlainText; text: "Longitude"; color: app.ink }
+                    TextField {
+                        id: locationLongitudeInput
+                        objectName: "locationLongitudeInput"
+                        placeholderText: "−180 to 180"
+                        inputMethodHints: Qt.ImhFormattedNumbersOnly
+                        selectByMouse: true
+                        Layout.fillWidth: true
+                        Accessible.name: "Manual location longitude"
+                    }
+                    Label { textFormat: Text.PlainText; text: "Caption (optional)"; color: app.ink }
+                    TextField { id: locationCaptionInput; objectName: "locationCaptionInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location caption" }
+                    Label { textFormat: Text.PlainText; text: "Place name (optional)"; color: app.ink }
+                    TextField { id: locationNameInput; objectName: "locationNameInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location name" }
+                    Label { textFormat: Text.PlainText; text: "Address (optional)"; color: app.ink }
+                    TextField { id: locationAddressInput; objectName: "locationAddressInput"; selectByMouse: true; Layout.fillWidth: true; Accessible.name: "Optional location address" }
+                }
+                ColumnLayout {
+                    visible: locationEntryDialog.reviewing
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Label {
+                        objectName: "locationReviewCoordinates"
+                        textFormat: Text.PlainText
+                        text: "Coordinates · " + Number(locationEntryDialog.reviewedLocation.latitude).toFixed(6) + "°, " + Number(locationEntryDialog.reviewedLocation.longitude).toFixed(6) + "°"
+                        color: app.ink
+                        wrapMode: Text.WrapAnywhere
+                        Layout.fillWidth: true
+                    }
+                    Label { visible: String(locationEntryDialog.reviewedLocation.caption || "") !== ""; textFormat: Text.PlainText; text: "Caption"; color: app.muted; font.pixelSize: 11 }
+                    Label { objectName: "locationReviewCaption"; visible: String(locationEntryDialog.reviewedLocation.caption || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.caption || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    Label { visible: String(locationEntryDialog.reviewedLocation.name || "") !== ""; textFormat: Text.PlainText; text: "Name"; color: app.muted; font.pixelSize: 11 }
+                    Label { objectName: "locationReviewName"; visible: String(locationEntryDialog.reviewedLocation.name || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.name || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                    Label { visible: String(locationEntryDialog.reviewedLocation.address || "") !== ""; textFormat: Text.PlainText; text: "Address"; color: app.muted; font.pixelSize: 11 }
+                    Label { objectName: "locationReviewAddress"; visible: String(locationEntryDialog.reviewedLocation.address || "") !== ""; textFormat: Text.PlainText; text: String(locationEntryDialog.reviewedLocation.address || ""); color: app.ink; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                }
+                Label {
+                    objectName: "locationShareError"
+                    textFormat: Text.PlainText
+                    text: locationEntryDialog.localError !== "" ? locationEntryDialog.localError : bridge.locationShareError
+                    visible: locationEntryDialog.localError !== "" || bridge.locationShareError !== ""
+                    color: app.danger
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
             }
         }
 
@@ -2028,6 +2038,7 @@ ApplicationWindow {
         objectName: "messageInfoDialog"
         anchors.centerIn: parent
         width: Math.min(430, app.width - 48)
+        height: Math.min(320, app.height - 32)
         modal: true
         title: "Message info"
         standardButtons: Dialog.Close
@@ -2077,7 +2088,7 @@ ApplicationWindow {
                 color: app.muted
                 wrapMode: TextEdit.Wrap
                 Layout.fillWidth: true
-                Layout.preferredHeight: contentHeight
+                Layout.preferredHeight: 48
                 font.pixelSize: 11
             }
 
@@ -2298,29 +2309,40 @@ ApplicationWindow {
         standardButtons: Dialog.Close
         onOpened: bridge.loadHub("chat.info", {"chat_id": bridge.selectedId})
         contentItem: ScrollView {
+            id: conversationInfoScroll
             objectName: "conversationInfoScroll"
             clip: true
             contentWidth: availableWidth
+            contentHeight: conversationInfoContent.implicitHeight
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-            ColumnLayout {
-                width: parent.width
-                spacing: 12
-                Label {
-                    visible: bridge.routeLoading || bridge.routeError.length > 0
-                    textFormat: Text.PlainText
-                    text: bridge.routeLoading ? "Loading cached conversation details…" : bridge.routeError
-                    color: bridge.routeError ? app.danger : app.muted
-                    wrapMode: Text.WordWrap
-                    Layout.fillWidth: true
-                }
-                CachedConversationInfo {
-                    objectName: "cachedConversationInfo"
-                    theme: app
-                    controller: bridge
-                    actionError: app.groupActionError
-                    record: bridge.routeMethod === "chat.info" && bridge.routeData.id === bridge.selectedId ? bridge.routeData : ({})
-                    visible: !!record.id && !bridge.routeLoading
-                    Layout.fillWidth: true
+            Item {
+                id: conversationInfoContent
+                width: conversationInfoScroll.availableWidth
+                implicitHeight: conversationInfoLayout.implicitHeight
+                height: implicitHeight
+                Column {
+                    id: conversationInfoLayout
+                    anchors.fill: parent
+                    spacing: 12
+                    Label {
+                        visible: bridge.routeLoading || bridge.routeError.length > 0
+                        width: parent.width
+                        height: implicitHeight
+                        textFormat: Text.PlainText
+                        text: bridge.routeLoading ? "Loading cached conversation details…" : bridge.routeError
+                        color: bridge.routeError ? app.danger : app.muted
+                        wrapMode: Text.WordWrap
+                    }
+                    CachedConversationInfo {
+                        objectName: "cachedConversationInfo"
+                        width: parent.width
+                        height: implicitHeight
+                        theme: app
+                        controller: bridge
+                        actionError: app.groupActionError
+                        record: bridge.routeMethod === "chat.info" && bridge.routeData.id === bridge.selectedId ? bridge.routeData : ({})
+                        visible: !!record.id && !bridge.routeLoading
+                    }
                 }
             }
         }

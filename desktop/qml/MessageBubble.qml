@@ -52,7 +52,20 @@ Item {
     readonly property real maxBubbleWidth: Math.min(560, Math.max(220, row.width * 0.72))
     readonly property real textWidth: Math.max(0, measure.implicitWidth)
     readonly property real naturalBubbleWidth: isContact || isLocation || isPoll || isPollResults || isList || isButtons || isTextCard || isLinkPreview || isAlbum ? 300 : hasAttachment ? 320 : textWidth + 28
-    readonly property real bubbleWidth: Math.min(maxBubbleWidth, Math.max(hasAttachment ? 260 : 42, naturalBubbleWidth, metadataRow.implicitWidth + 20))
+    readonly property real metadataWidth: timeMetrics.advanceWidth + (record.outgoing ? 6 + statusMetrics.advanceWidth : 0)
+    readonly property real bubbleWidth: Math.min(maxBubbleWidth, Math.max(hasAttachment ? 260 : 42, naturalBubbleWidth, metadataWidth + 20))
+
+    TextMetrics {
+        id: timeMetrics
+        text: metadataTimeLabel.text
+        font: metadataTimeLabel.font
+    }
+
+    TextMetrics {
+        id: statusMetrics
+        text: metadataStatusLabel.text
+        font: metadataStatusLabel.font
+    }
 
     signal menuRequested(var message, Item anchor)
     signal mediaRequested(var message)
@@ -1237,12 +1250,14 @@ Item {
                 Layout.alignment: Qt.AlignRight
                 spacing: 6
                 Label {
+                    id: metadataTimeLabel
                     textFormat: Text.PlainText
                     text: controller.timeLabel(record.timestamp)
                     color: theme.muted
                     font.pixelSize: 10
                 }
                 Label {
+                    id: metadataStatusLabel
                     objectName: "messageStatusLabel"
                     textFormat: Text.PlainText
                     visible: record.outgoing
@@ -1275,6 +1290,7 @@ Item {
         objectName: "listReplyDialog"
         anchors.centerIn: Overlay.overlay
         width: Math.min(440, Math.max(280, row.width - 32))
+        height: 360
         title: "Choose a response"
         modal: true
         focus: true
@@ -1409,6 +1425,7 @@ Item {
         objectName: "buttonsReplyDialog"
         anchors.centerIn: Overlay.overlay
         width: Math.min(440, Math.max(280, row.width - 32))
+        height: 360
         title: "Choose a demo response"
         modal: true
         focus: true

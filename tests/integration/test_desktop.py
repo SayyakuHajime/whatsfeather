@@ -89,6 +89,11 @@ class NativeDesktop(unittest.TestCase):
             self.assertIn("Native forward PASS", output)
             self.assertIn("static WebP sticker", output)
             self.assertIn("Native local sticker packs PASS", output)
+            self.assertNotIn("Layout polish loop detected", output, output)
+            self.assertNotIn(
+                'Binding loop detected for property "implicitHeight"', output, output
+            )
+            self.assertNotIn("cannot find any window to open popup in", output, output)
             self.assertNotIn("qrc:", output)
             self.assertNotIn("qml:", output.lower())
             with sqlite3.connect(profile / "history.db") as db:

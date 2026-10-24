@@ -3137,6 +3137,20 @@ void runPolishTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
             return;
           }
           invoke(window, "messageInfoDialog", "close");
+          state->stage = 19;
+        } else if (state->stage == 19) {
+          auto *info = named(window, "messageInfoDialog");
+          if (info && info->property("visible").toBool())
+            return;
+          if (!invoke(window, "messageMenu", "open")) {
+            fail("root message menu reopen before reaction submenu");
+            return;
+          }
+          state->stage = 191;
+        } else if (state->stage == 191) {
+          auto *messageMenu = named(window, "messageMenu");
+          if (!messageMenu || !messageMenu->property("visible").toBool())
+            return;
           auto *reactionMenu = named(window, "messageReactionMenu");
           if (!reactionMenu || !invoke(window, "messageReactionMenu", "open")) {
             fail("reaction submenu open");
