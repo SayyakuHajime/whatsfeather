@@ -218,7 +218,15 @@ void runLocationTest(QGuiApplication &app, QQuickWindow *window,
     app.exit(1);
     return;
   }
-  struct State { int ticks = 0; int stage = 0; int unknownWait = 0; bool minimumWindowResizeRequested = false; };
+  struct State {
+    int ticks = 0;
+    int stage = 0;
+    int unknownWait = 0;
+    int minimumWindowOverflowWait = 0;
+    bool minimumWindowResizeRequested = false;
+    bool minimumWindowOverflowRequested = false;
+    qreal minimumWindowInitialContentHeight = 0.0;
+  };
   auto state = std::make_shared<State>();
   auto *timer = new QTimer(&app);
   timer->setInterval(50);
@@ -304,13 +312,57 @@ void runLocationTest(QGuiApplication &app, QQuickWindow *window,
       if (window->height() != 480)
         return;
       auto *scroll = named(window, QStringLiteral("locationEntryScroll"));
-      const qreal dialogHeight = dialog->property("height").toReal();
-      const qreal viewportHeight = scroll ? scroll->property("availableHeight").toReal() : 0.0;
-      const qreal contentHeight = scroll ? scroll->property("contentHeight").toReal() : 0.0;
-      if (!scroll || dialogHeight > window->height() - 32 || viewportHeight <= 0 || contentHeight <= viewportHeight) {
-        fail(QStringLiteral("manual location entry must remain bounded and scrollable at minimum window height"));
+      if (!scroll) {
+        fail(QStringLiteral("manual location entry scroll viewport was not rendered"));
         return;
       }
+      const QString overflowError = QStringLiteral("Synthetic manual location scroll overflow fixture. ").repeated(80);
+      if (!state->minimumWindowOverflowRequested) {
+        state->minimumWindowInitialContentHeight = scroll->property("contentHeight").toReal();
+        dialog->setProperty("localError", overflowError);
+        state->minimumWindowOverflowRequested = true;
+        return;
+      }
+      const qreal dialogHeight = dialog->property("height").toReal();
+      const qreal viewportHeight = scroll->property("availableHeight").toReal();
+      const qreal contentHeight = scroll->property("contentHeight").toReal();
+      if (dialogHeight > window->height() - 32 || viewportHeight <= 0) {
+        fail(QStringLiteral("manual location dialog exceeded its minimum-window bounds"));
+        return;
+      }
+      auto *overflowLabel = named(window, QStringLiteral("locationShareError"));
+      if (!overflowLabel) {
+        fail(QStringLiteral("manual location validation label was not rendered"));
+        return;
+      }
+      if (!overflowLabel->property("visible").toBool() ||
+          overflowLabel->property("text").toString() != overflowError ||
+          contentHeight <= viewportHeight ||
+          contentHeight <= state->minimumWindowInitialContentHeight + 100.0) {
+        if (++state->minimumWindowOverflowWait <= 40)
+          return;
+        fail(QStringLiteral("manual location ScrollView did not grow for overflowing validation text (dialog=%1, viewport=%2, content=%3, initial=%4)")
+                 .arg(dialogHeight, 0, 'f', 1)
+                 .arg(viewportHeight, 0, 'f', 1)
+                 .arg(contentHeight, 0, 'f', 1)
+                 .arg(state->minimumWindowInitialContentHeight, 0, 'f', 1));
+        return;
+      }
+      auto *scrollContent = scroll->property("contentItem").value<QObject *>();
+      if (!scrollContent || scrollContent->metaObject()->indexOfProperty("contentY") < 0) {
+        fail(QStringLiteral("manual location ScrollView has no scrollable content item"));
+        return;
+      }
+      const qreal maximumScroll = contentHeight - viewportHeight;
+      scrollContent->setProperty("contentY", maximumScroll);
+      const qreal scrolledY = scrollContent->property("contentY").toReal();
+      if (scrolledY <= 0 || scrolledY + 1.0 < maximumScroll) {
+        fail(QStringLiteral("manual location content could not scroll to its overflow (max=%1, actual=%2)")
+                 .arg(maximumScroll, 0, 'f', 1)
+                 .arg(scrolledY, 0, 'f', 1));
+        return;
+      }
+      scrollContent->setProperty("contentY", 0.0);
       latitude->setProperty("text", QStringLiteral("91"));
       longitude->setProperty("text", QStringLiteral("-122.3"));
       caption->setProperty("text", QStringLiteral("Manual <b>caption</b>"));

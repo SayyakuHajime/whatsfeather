@@ -1783,8 +1783,10 @@ ApplicationWindow {
             objectName: "locationEntryScroll"
             clip: true
             contentWidth: availableWidth
+            contentHeight: locationEntryContent.implicitHeight
 
             ColumnLayout {
+                id: locationEntryContent
                 width: locationEntryScroll.availableWidth
                 spacing: 10
 
