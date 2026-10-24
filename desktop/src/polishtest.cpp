@@ -24,6 +24,75 @@
 #include <memory>
 
 namespace {
+bool renderedSmpteBars(const QImage &screenshot, QQuickWindow *window,
+                       QQuickItem *video, const QSize &frameSize,
+                       QImage *videoCrop, QString *diagnostic) {
+  if (screenshot.isNull() || !window || !video || frameSize.isEmpty() ||
+      window->width() <= 0 || window->height() <= 0 || video->width() <= 0 ||
+      video->height() <= 0) {
+    if (diagnostic)
+      *diagnostic = QStringLiteral("rendered screenshot/video geometry is unavailable");
+    return false;
+  }
+
+  const qreal pixelScaleX = qreal(screenshot.width()) / window->width();
+  const qreal pixelScaleY = qreal(screenshot.height()) / window->height();
+  const qreal contentScale =
+      qMin(video->width() / frameSize.width(),
+           video->height() / frameSize.height());
+  const qreal contentWidth = frameSize.width() * contentScale;
+  const qreal contentHeight = frameSize.height() * contentScale;
+  const QPointF videoOrigin = video->mapToScene(QPointF(0, 0));
+  const qreal contentLeft =
+      videoOrigin.x() + (video->width() - contentWidth) / 2;
+  const qreal contentTop =
+      videoOrigin.y() + (video->height() - contentHeight) / 2;
+  const QRect contentPixels(
+      qFloor(contentLeft * pixelScaleX), qFloor(contentTop * pixelScaleY),
+      qCeil(contentWidth * pixelScaleX), qCeil(contentHeight * pixelScaleY));
+  if (videoCrop)
+    *videoCrop = screenshot.copy(contentPixels.intersected(screenshot.rect()));
+
+  static const QStringList barNames{
+      QStringLiteral("white"), QStringLiteral("yellow"),
+      QStringLiteral("cyan"), QStringLiteral("green"),
+      QStringLiteral("magenta"), QStringLiteral("red"),
+      QStringLiteral("blue")};
+  const auto matchesBar = [](int index, const QColor &pixel) {
+    switch (index) {
+    case 0: return pixel.red() > 175 && pixel.green() > 175 && pixel.blue() > 175;
+    case 1: return pixel.red() > 165 && pixel.green() > 145 && pixel.blue() < 115;
+    case 2: return pixel.red() < 115 && pixel.green() > 155 && pixel.blue() > 155;
+    case 3: return pixel.red() < 115 && pixel.green() > 135 && pixel.blue() < 115;
+    case 4: return pixel.red() > 155 && pixel.green() < 115 && pixel.blue() > 155;
+    case 5: return pixel.red() > 165 && pixel.green() < 115 && pixel.blue() < 115;
+    case 6: return pixel.red() < 115 && pixel.green() < 115 && pixel.blue() > 155;
+    default: return false;
+    }
+  };
+
+  QStringList samples;
+  bool matches = true;
+  const qreal sampleY = (contentTop + contentHeight * 0.25) * pixelScaleY;
+  for (int index = 0; index < barNames.size(); ++index) {
+    const qreal sampleX =
+        (contentLeft + contentWidth * (index + 0.5) / barNames.size()) *
+        pixelScaleX;
+    const QPoint point(qBound(0, qRound(sampleX), screenshot.width() - 1),
+                       qBound(0, qRound(sampleY), screenshot.height() - 1));
+    const QColor pixel = screenshot.pixelColor(point);
+    const bool matched = matchesBar(index, pixel);
+    matches = matches && matched;
+    samples.append(QStringLiteral("%1=%2,%3,%4%5")
+                       .arg(barNames[index])
+                       .arg(pixel.red()).arg(pixel.green()).arg(pixel.blue())
+                       .arg(matched ? QString() : QStringLiteral(" (mismatch)")));
+  }
+  if (diagnostic)
+    *diagnostic = samples.join(QStringLiteral("; "));
+  return matches;
+}
+
 QObject *named(QQuickWindow *w, const QString &name) {
   if (auto *object = w->findChild<QObject *>(name))
     return object;
@@ -1322,6 +1391,23 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
       if (!frame.isValid()) return;
       if (frame.size() != QSize(96, 64)) { fail("media viewer decoded frame size changed"); return; }
       capture("media-viewer-playing");
+      const QImage renderedScreenshot = window->grabWindow();
+      QImage renderedVideoCrop;
+      QString colorDiagnostics;
+      const bool renderedBars = renderedSmpteBars(
+          renderedScreenshot, window, qobject_cast<QQuickItem *>(video),
+          frame.size(), &renderedVideoCrop, &colorDiagnostics);
+      const QString videoCropPath = captureDir + "/media-viewer-playing-video.png";
+      if (renderedVideoCrop.isNull() || !renderedVideoCrop.save(videoCropPath)) {
+        fail("could not save the cropped rendered video area"); return;
+      }
+      if (!renderedBars) {
+        fail("rendered video crop did not show the synthetic SMPTE color bars: " +
+             colorDiagnostics);
+        return;
+      }
+      qInfo() << "Native rendered video SMPTE color bars PASS:" << videoCropPath
+              << colorDiagnostics;
       if (named(window, "viewerAudioOutput") || !named(window, "viewerAudioOutputLoader") ||
           !named(window, "mediaViewer")->property("audioMuted").toBool()) {
         fail("explicit Play must remain muted until Unmute"); return;

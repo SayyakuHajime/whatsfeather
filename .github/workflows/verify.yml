@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: 50
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 ffmpeg libpulse0
+          sudo apt-get install --yes --no-install-recommends libgl1-mesa-dev libxkbcommon-x11-0 libxcb-cursor0 ffmpeg libpulse0 xvfb xauth
 
       - name: Install Qt baseline and required modules
         timeout-minutes: 45
@@ -129,8 +129,9 @@ jobs:
           TMPDIR: ${{ runner.temp }}
           QT_QPA_PLATFORM: offscreen
           QT_QUICK_BACKEND: software
+          WHATSFEATHER_VIDEO_QPA_PLATFORM: xcb
           QT_FORCE_STDERR_LOGGING: '1'
           GOPROXY: 'off'
           GOSUMDB: 'off'
           BUILD_JOBS: '2'
-        run: ./scripts/verify.sh
+        run: timeout --signal=TERM --kill-after=30s 40m xvfb-run -a ./scripts/verify.sh

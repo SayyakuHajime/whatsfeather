@@ -1,5 +1,6 @@
 // Private in-process RPC fixture and keyboard interaction probe for New chat.
 #include "controller.h"
+#include <QGuiApplication>
 #include <QCoreApplication>
 #include <QDebug>
 #include <QDir>

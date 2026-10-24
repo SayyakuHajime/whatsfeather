@@ -1,5 +1,6 @@
 // Private same-UID RPC and native UI fixture for contact-card review/share.
 #include "controller.h"
+#include <QGuiApplication>
 #include <QDir>
 #include <QFile>
 #include <QFileDevice>

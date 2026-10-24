@@ -112,6 +112,27 @@ class WorkflowConfigurationTest(unittest.TestCase):
                     r"(?m)^        timeout-minutes:\s*45\s*$",
                 )
 
+    def test_native_qt_video_renderer_uses_bounded_xcb_under_xvfb(self):
+        prerequisites = self.native_qt_step("Install native build/runtime prerequisites")
+        self.assertRegex(
+            prerequisites,
+            r"(?m)^\s*sudo apt-get install --yes --no-install-recommends"
+            r"[^\n]*\bxvfb\b[^\n]*\bxauth\b",
+        )
+
+        acceptance = self.native_qt_step("Run canonical build and synthetic acceptance")
+        self.assertRegex(acceptance, r"(?m)^\s*QT_QPA_PLATFORM:\s*offscreen\s*$")
+        self.assertRegex(acceptance, r"(?m)^\s*QT_QUICK_BACKEND:\s*software\s*$")
+        self.assertRegex(
+            acceptance,
+            r"(?m)^\s*WHATSFEATHER_VIDEO_QPA_PLATFORM:\s*xcb\s*$",
+        )
+        self.assertRegex(
+            acceptance,
+            r"(?m)^        run: timeout --signal=TERM --kill-after=30s 40m "
+            r"xvfb-run -a ./scripts/verify\.sh\s*$",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

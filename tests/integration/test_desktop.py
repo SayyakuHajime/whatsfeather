@@ -9,6 +9,21 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+
+def video_renderer_environment(parent_environment, qpa_selector):
+    """Route only the synthetic video child through an explicitly selected QPA."""
+    if qpa_selector not in (None, "", "xcb"):
+        raise ValueError(f"unsupported video QPA selector: {qpa_selector}")
+    environment = dict(parent_environment)
+    if qpa_selector == "xcb":
+        environment["QT_QPA_PLATFORM"] = "xcb"
+        environment.pop("QT_QUICK_BACKEND", None)
+    else:
+        environment["QT_QPA_PLATFORM"] = "offscreen"
+        environment["QT_QUICK_BACKEND"] = "software"
+    return environment
+
+
 class NativeDesktop(unittest.TestCase):
     def run_capture(self, theme, interaction=False):
         with tempfile.TemporaryDirectory(prefix="wf-ui-") as temp:
@@ -253,18 +268,23 @@ class NativeDesktop(unittest.TestCase):
             fixture = root / "synthetic.mp4"
             subprocess.run([
                 "ffmpeg", "-hide_banner", "-loglevel", "error", "-threads", "1",
-                "-f", "lavfi", "-i", "testsrc=size=96x64:rate=12:duration=2",
+                "-f", "lavfi", "-i", "smptebars=size=96x64:rate=12:duration=2",
                 "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=2",
                 "-shortest", "-t", "2", "-c:v", "libx264", "-preset", "ultrafast",
                 "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-c:a", "aac",
                 "-profile:a", "aac_low", "-b:a", "64k", "-movflags", "+faststart",
                 "-y", str(fixture),
             ], check=True, capture_output=True)
-            capture = root / "qa"
-            env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
-                       QT_FORCE_STDERR_LOGGING="1", XDG_RUNTIME_DIR=str(root),
-                       XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
-                       XDG_CACHE_HOME=str(root / "cache"), WHATSFEATHER_QA_CAPTURE_DIR=str(capture))
+            capture_root = os.environ.get("WHATSFEATHER_QA_ROOT")
+            capture = Path(capture_root) / "video" if capture_root else root / "qa"
+            env = video_renderer_environment(
+                os.environ, os.environ.get("WHATSFEATHER_VIDEO_QPA_PLATFORM")
+            )
+            env.update(
+                QT_FORCE_STDERR_LOGGING="1", XDG_RUNTIME_DIR=str(root),
+                XDG_CONFIG_HOME=str(root / "config"), XDG_DATA_HOME=str(root / "data"),
+                XDG_CACHE_HOME=str(root / "cache"), WHATSFEATHER_QA_CAPTURE_DIR=str(capture),
+            )
             profile = root / "profile"
             result = subprocess.run([
                 str(ROOT / "build/bin/whatsfeather"), "--demo", "--theme", "dark",
@@ -273,10 +293,12 @@ class NativeDesktop(unittest.TestCase):
             output = result.stdout + result.stderr
             self.assertEqual(result.returncode, 0, output)
             self.assertIn("Native video PASS", output)
+            self.assertIn("Native rendered video SMPTE color bars PASS", output)
             self.assertNotIn("Unsupported image format", output, output)
             self.assertNotIn("Error decoding", output, output)
             self.assertNotIn("qml:", output.lower())
-            for name in ("attachment-video-review.png", "media-viewer.png", "media-viewer-playing.png"):
+            for name in ("attachment-video-review.png", "media-viewer.png",
+                         "media-viewer-playing.png", "media-viewer-playing-video.png"):
                 image = capture / name
                 self.assertTrue(image.exists(), name)
                 self.assertEqual(image.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
