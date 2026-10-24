@@ -9,6 +9,7 @@
 #include <QFontMetricsF>
 #include <QImage>
 #include <QJSValue>
+#include <QMediaPlayer>
 #include <QQuickItem>
 #include <QImageReader>
 #include <QJsonDocument>
@@ -394,9 +395,13 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
     int stage = 0;
     int deadlineStage = -1;
     int stageTicks = 0;
+    int duplicateTimelineFixtureTicks = 0;
+    int stableTimelineFixtureTicks = 0;
     int audioLabelWaitTicks = 0;
     QString audioLabelWaitRecord;
     QString audioLabelWaitDiagnostic;
+    QString testVideoMessageId;
+    QString testVideoChatId;
     QString mediaTarget;
     QString mediaChat;
     QStringList mediaRpcMethods;
@@ -439,10 +444,24 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         fail(QStringLiteral("timed out waiting for rendered timeline fixtures: %1")
                  .arg(state->audioLabelWaitRecord + QStringLiteral(" ") +
                       state->audioLabelWaitDiagnostic));
+      } else if (state->stage == 4 && fixture.endsWith(".mp4", Qt::CaseInsensitive)) {
+        fail(QStringLiteral("timed out waiting for the video message's open-media control: %1@%2")
+                 .arg(state->testVideoMessageId, state->testVideoChatId));
       } else if (state->stage == 50) {
         auto *player = named(window, "viewerPlayer");
         auto *video = named(window, "viewerVideoOutput");
         auto *sink = video ? qobject_cast<QVideoSink *>(video->property("videoSink").value<QObject *>()) : nullptr;
+        auto *mediaPlayer = qobject_cast<QMediaPlayer *>(player);
+        auto *playerSink = mediaPlayer ? mediaPlayer->videoSink() : nullptr;
+        auto *videoItem = qobject_cast<QQuickItem *>(video);
+        auto *viewer = named(window, "mediaViewer");
+        const QString sinkBinding = !mediaPlayer
+                                        ? QStringLiteral("missing player")
+                                        : playerSink == sink ? QStringLiteral("matches")
+                                                             : QStringLiteral("different");
+        const QString videoGeometry = videoItem
+                                          ? QStringLiteral("%1x%2").arg(videoItem->width()).arg(videoItem->height())
+                                          : QStringLiteral("missing");
         const QString playbackState = player
                                           ? QString::number(player->property("playbackState").toInt())
                                           : QStringLiteral("missing");
@@ -464,7 +483,7 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         const int videoTrackCount = player
                                         ? player->property("videoTracks").toList().size()
                                         : -1;
-        fail(QStringLiteral("timed out waiting for video frame after %1 stage ticks: playbackState=%2 position=%3 duration=%4 sink=%5 frameValid=%6 error=%7 videoFrameEvents=%8 validFrameEvents=%9 lastFrameValid=%10 lastFrameSize=%11x%12 lastFrameStart=%13 lastFramePixelFormat=%14 mediaStatus=%15 activeVideoTrack=%16 videoTrackCount=%17")
+        fail(QStringLiteral("timed out waiting for video frame after %1 stage ticks: playbackState=%2 position=%3 duration=%4 sink=%5 frameValid=%6 error=%7 videoFrameEvents=%8 validFrameEvents=%9 lastFrameValid=%10 lastFrameSize=%11x%12 lastFrameStart=%13 lastFramePixelFormat=%14 mediaStatus=%15 activeVideoTrack=%16 videoTrackCount=%17 playerSink=%18 sinkBinding=%19 videoGeometry=%20 videoVisible=%21 viewerVisible=%22 viewerOpened=%23 sourceIsLocal=%24")
                  .arg(state->stageTicks)
                  .arg(playbackState)
                  .arg(position)
@@ -481,7 +500,14 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
                  .arg(state->lastVideoFramePixelFormat)
                  .arg(mediaStatus)
                  .arg(activeVideoTrack)
-                 .arg(videoTrackCount));
+                 .arg(videoTrackCount)
+                 .arg(playerSink ? QStringLiteral("present") : QStringLiteral("missing"))
+                 .arg(sinkBinding)
+                 .arg(videoGeometry)
+                 .arg(videoItem && videoItem->isVisible() ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(viewer && viewer->property("visible").toBool() ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(viewer && viewer->property("opened").toBool() ? QStringLiteral("yes") : QStringLiteral("no"))
+                 .arg(mediaPlayer && mediaPlayer->source().isLocalFile() ? QStringLiteral("yes") : QStringLiteral("no")));
       } else {
         fail(state->stage == 20 ? QStringLiteral("timed out waiting for rendered timeline fixtures")
                                 : QStringLiteral("timed out after %1 stage ticks").arg(state->stageTicks));
@@ -684,12 +710,22 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
       verify(window->contentItem());
       if (!timer->isActive()) return;
       if (testedShort > 1 || testedQuote > 1 || testedUnsupported > 1 || testedAudio > 1 || testedVoiceNote > 1 || testedReceiptRead > 1) {
-        fail("duplicate native timeline fixture delegate"); return;
+        // DelegateModel may still be cancelling/reusing cached rows immediately
+        // after modelReset. Require the unique fixture set to settle before failing.
+        state->stableTimelineFixtureTicks = 0;
+        if (++state->duplicateTimelineFixtureTicks > 5)
+          fail("duplicate native timeline fixture delegate persisted after model reset");
+        return;
       }
+      state->duplicateTimelineFixtureTicks = 0;
       // ListView delegate creation/reuse follows modelReset asynchronously. Wait
       // for the real fixture rows to settle instead of failing on the first tick.
       if (testedShort != 1 || testedQuote != 1 || testedUnsupported != 1 ||
-          testedAudio != 1 || testedVoiceNote != 1 || testedReceiptRead != 1) return;
+          testedAudio != 1 || testedVoiceNote != 1 || testedReceiptRead != 1) {
+        state->stableTimelineFixtureTicks = 0;
+        return;
+      }
+      if (++state->stableTimelineFixtureTicks < 2) return;
       qInfo() << "Native receipt status UI PASS: synthetic read receipt is rendered accessibly and bound to its message";
       auto *newChat = named(window, "newChatButton");
       auto *mediaHub = named(window, "mediaLibraryButton");
@@ -1311,9 +1347,15 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
           const auto row = c.messages()->row(i);
           const auto attachment = row.value("attachment").toMap();
           if (row.value("body").toString() == QStringLiteral("synthetic video caption") &&
-              attachment.value("kind").toString() == QStringLiteral("video")) foundVideo = true;
+              attachment.value("kind").toString() == QStringLiteral("video")) {
+            foundVideo = true;
+            state->testVideoMessageId = row.value("id").toString();
+            state->testVideoChatId = row.value("chat_id").toString();
+          }
         }
-        if (!foundVideo) { fail("video send did not retain its caption in the timeline"); return; }
+        if (!foundVideo || state->testVideoMessageId.isEmpty() || state->testVideoChatId.isEmpty()) {
+          fail("video send did not retain its caption and exact identity in the timeline"); return;
+        }
       }
       if (fixture.endsWith(".pdf", Qt::CaseInsensitive)) {
         bool foundDocument = false;
@@ -1332,8 +1374,21 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         return;
       }
       QQuickItem *mediaButton = nullptr;
+      const bool isVideoFixture = fixture.endsWith(".mp4", Qt::CaseInsensitive);
       std::function<void(QQuickItem *)> findVisible = [&](QQuickItem *item) {
-        if (item->objectName() == "openMediaButton" && item->isVisible()) mediaButton = item;
+        if (item->objectName() == "openMediaButton" && item->isVisible()) {
+          auto *recordBubble = item;
+          while (recordBubble && !recordBubble->property("record").isValid())
+            recordBubble = recordBubble->parentItem();
+          const auto record = recordBubble ? recordBubble->property("record").toMap() : QVariantMap{};
+          const auto attachment = record.value("attachment").toMap();
+          const bool matchesVideoTarget = !isVideoFixture ||
+              (record.value("id").toString() == state->testVideoMessageId &&
+               record.value("chat_id").toString() == state->testVideoChatId &&
+               attachment.value("kind").toString() == QStringLiteral("video"));
+          if (matchesVideoTarget)
+            mediaButton = item;
+        }
         for (auto *child : item->childItems()) findVisible(child);
       };
       findVisible(window->contentItem());
@@ -1387,6 +1442,10 @@ void runProductTest(QGuiApplication &app, QQuickWindow *window, Controller &c,
         if (qAbs(displayedRatio - qreal(96) / 64) > 0.01) { fail("video aspect ratio changed"); return; }
         auto *sink = qobject_cast<QVideoSink *>(video->property("videoSink").value<QObject *>());
         if (!sink) { fail("media viewer output has no QVideoSink before playback"); return; }
+        auto *mediaPlayer = qobject_cast<QMediaPlayer *>(player);
+        if (!mediaPlayer || mediaPlayer->videoSink() != sink) {
+          fail("media viewer player is not bound to its VideoOutput QVideoSink"); return;
+        }
         QObject::connect(sink, &QVideoSink::videoFrameChanged, window,
                          [state](const QVideoFrame &frame) {
           ++state->videoFrameEvents;

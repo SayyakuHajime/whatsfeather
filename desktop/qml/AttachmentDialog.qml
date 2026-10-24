@@ -32,7 +32,6 @@ Dialog {
         id: videoReviewPlayer
         objectName: "videoReviewPlayer"
         source: dialog.visible && dialog.isVideo ? dialog.localVideoSource : ""
-        autoPlay: false
         audioOutput: videoReviewAudioOutputLoader.item
         videoOutput: videoReviewOutput
     }
@@ -50,7 +49,6 @@ Dialog {
         id: audioReviewPlayer
         objectName: "audioReviewPlayer"
         source: dialog.visible && dialog.audioReview ? dialog.localAudioSource : ""
-        autoPlay: false
         audioOutput: audioReviewAudioOutputLoader.item
     }
     Loader {

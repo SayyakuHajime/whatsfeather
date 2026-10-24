@@ -25,9 +25,8 @@ Dialog {
         id: player
         objectName: "viewerPlayer"
         source: viewer.visible && viewer.playable ? viewer.localSource : ""
-        autoPlay: false
         audioOutput: audioOutputLoader.item
-        videoOutput: videoOutput
+        videoOutput: viewerVideoSurface
     }
     Loader {
         id: audioOutputLoader
@@ -116,7 +115,7 @@ Dialog {
             color: viewer.theme.muted
         }
         VideoOutput {
-            id: videoOutput
+            id: viewerVideoSurface
             objectName: "viewerVideoOutput"
             anchors.fill: parent
             visible: viewer.isVideo
