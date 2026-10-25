@@ -34,7 +34,7 @@ qt_add_resources(whatsfeather "chat-backgrounds" PREFIX "/backgrounds" BASE "des
 include(GNUInstallDirs)
 install(TARGETS whatsfeather RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS "${CMAKE_BINARY_DIR}/bin/whatsfeatherd" DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/LICENSES/ASSET-LICENSES.md" DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/WhatsFeather)
+install(FILES "${CMAKE_SOURCE_DIR}/LICENSE" "${CMAKE_SOURCE_DIR}/LICENSES/ASSET-LICENSES.md" "${CMAKE_SOURCE_DIR}/LICENSES/THIRD-PARTY-NOTICES.md" DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/WhatsFeather)
 install(FILES desktop/packaging/whatsfeather.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 foreach(size IN LISTS FEATHER_APP_ICON_SIZES)
  install(FILES desktop/assets/app-icons/whatsfeather-${size}.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${size}x${size}/apps RENAME whatsfeather.png)

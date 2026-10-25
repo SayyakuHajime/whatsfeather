@@ -12,6 +12,7 @@ ctest --test-dir "$ROOT/build" --output-on-failure
 python3 "$ROOT/tests/test_theme.py"
 python3 "$ROOT/tests/test_app_icon.py"
 python3 "$ROOT/tests/test_asset_license_manifest.py"
+python3 "$ROOT/tests/test_third_party_notices.py"
 python3 "$ROOT/tests/test_chat_wallpaper.py"
 python3 "$ROOT/tests/integration/test_rpc.py"
 python3 "$ROOT/tests/test_live_test_scope_cli.py"

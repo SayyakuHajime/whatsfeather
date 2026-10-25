@@ -102,6 +102,6 @@ CI configuration is present but is not evidence of a successful hosted run. Rele
 
 Unofficial; not affiliated with, authorized by or endorsed by WhatsApp or Meta. Protocol changes and account restrictions are possible. Local history, media and sessions are not encrypted at rest by this application.
 
-**Project license: GPL-3.0-only** (see [LICENSE](LICENSE)). This applies to original WhatsFeather code and the 32 listed image/vector assets; [ASSET-LICENSES.md](LICENSES/ASSET-LICENSES.md) records the explicit asset grant and file hashes. Asset authorship is owner-self-attested, not independently verified. Third-party dependencies, Qt/runtime components, and system packages retain their own licenses. Dependency notices and release-distribution compliance remain subject to review.
+**Project license: GPL-3.0-only** (see [LICENSE](LICENSE)). This applies to original WhatsFeather code and the 32 listed image/vector assets; [ASSET-LICENSES.md](LICENSES/ASSET-LICENSES.md) records the explicit asset grant and file hashes. Asset authorship is owner-self-attested, not independently verified. [THIRD-PARTY-NOTICES.md](LICENSES/THIRD-PARTY-NOTICES.md) reproduces root notice files for pinned vendored Go modules. Qt/runtime components and system packages retain their own licenses; this inventory is not a complete compatibility, provenance, or distribution-compliance review.
 
 <div align="right"><a href="#readme-top">↖ Back to top</a></div>

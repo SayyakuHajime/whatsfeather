@@ -1,0 +1,2 @@
+# Preserve verbatim upstream notice text, including any trailing spaces.
+LICENSES/THIRD-PARTY-NOTICES.md whitespace=-blank-at-eol

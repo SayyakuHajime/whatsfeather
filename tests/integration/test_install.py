@@ -42,6 +42,10 @@ class RelocatedInstall(unittest.TestCase):
                 self.assertTrue(installed_asset_manifest.is_file())
                 self.assertEqual(installed_asset_manifest.read_bytes(),
                                  (ROOT / "LICENSES/ASSET-LICENSES.md").read_bytes())
+                installed_third_party_notices = prefix / "share/licenses/WhatsFeather/THIRD-PARTY-NOTICES.md"
+                self.assertTrue(installed_third_party_notices.is_file())
+                self.assertEqual(installed_third_party_notices.read_bytes(),
+                                 (ROOT / "LICENSES/THIRD-PARTY-NOTICES.md").read_bytes())
                 for name in ("whatsfeather", "whatsfeatherd"):
                     installed = prefix / "bin" / name
                     self.assertTrue(installed.is_file())

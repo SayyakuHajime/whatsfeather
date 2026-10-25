@@ -1,12 +1,13 @@
 # Roadmap
 
-Planning stage: all milestones below are pending. Scope may change; no release dates or performance claims are promised.
+**Current assessment: pre-alpha / release no-go.** A runnable native Qt/C++ application and Go/SQLite backend have synthetic end-to-end tests. Limited spare-account evidence is not full WhatsApp parity or production acceptance.
 
-1. **Foundation:** native desktop shell, backend lifecycle, protocol validation and automated tests.
-2. **Text MVP:** QR linking, local chat history, drafts, send/receive text and reliable reconnect handling.
-3. **Daily-use alpha:** search, notifications, media, keyboard access and light/dark themes.
-4. **Hardening:** performance measurements, bounded resource use, recovery tests and privacy review.
-5. **Preview release:** packaging, verified upgrades and documented limitations.
+1. **Messaging parity:** finish service-backed send/receive, receipts, reactions/edit/revoke, identity/history reconciliation, structured interaction and all supported media paths. Preserve unknown outcomes rather than resend blindly.
+2. **Daily-use native UI:** complete notification delivery, conversation/group details, media browsing, keyboard access, profile/settings and accessibility. Cached/local-only features must stay visibly distinct from remote state.
+3. **Broader service features:** groups, communities, channels, status and native calling require their own implementation and interoperability evidence. Disabled buttons or readable summaries do not count as support.
+4. **Security and performance:** maintain bounded storage/models/RPC; verify recovery, vulnerability fixes, dependency/runtime licensing and an explicit local-storage threat model. Measure startup, memory, real-renderer interaction and scrolling without unsupported browser comparisons.
+5. **Release:** complete project/dependency/runtime licensing and redistribution review, establish private vulnerability reporting, run the supported-toolchain CI matrix, produce packages, and verify clean install/upgrade/rollback, signing and update trust.
 
-The interface aims to stay familiar to WhatsApp users while improving usability.
-Voice/video calls require separate technical validation and remain outside the MVP. AI/MCP, bulk messaging and scraping are not core features.
+Local progress includes reviewed poll voting with encrypted synthetic updates, privacy-safe notification plumbing, cross-chat/per-chat cached media metadata and details, dependency/security checks and startup/resource benchmark tooling. These remain scoped implementation proofs, not closure of the broader release gates. No release date is promised.
+
+The interface remains familiar to WhatsApp users. AI/MCP, bulk messaging and scraping are not core features; view-once/disappearing-content protections must not be bypassed.

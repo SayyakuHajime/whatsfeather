@@ -172,6 +172,17 @@ def _load_inventory_module() -> Any:
     return module
 
 
+def _load_notice_generator() -> Any:
+    module_path = Path(__file__).with_name("generate-third-party-notices.py")
+    spec = importlib.util.spec_from_file_location("whatsfeather_third_party_notice_generator", module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load generate-third-party-notices.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def forbidden_tracked_paths(root: Path) -> list[str]:
     """Inspect index names only, never open forbidden content, even if force-added."""
     tracked = subprocess.run(["git", "ls-files", "--cached", "-z"], cwd=root,
@@ -212,6 +223,21 @@ def evaluate(root: Path, mode: str) -> tuple[list[str], int, int]:
         asset_license_path = root / "LICENSES" / "ASSET-LICENSES.md"
         if not asset_license_path.is_file() or asset_license_path.stat().st_size == 0:
             errors.append("release mode requires a non-empty LICENSES/ASSET-LICENSES.md")
+        third_party_notice_path = root / "LICENSES" / "THIRD-PARTY-NOTICES.md"
+        if not third_party_notice_path.is_file() or third_party_notice_path.stat().st_size == 0:
+            errors.append("release mode requires a non-empty LICENSES/THIRD-PARTY-NOTICES.md")
+        else:
+            try:
+                expected_notices = _load_notice_generator().render_notices(root)
+                current_notices = third_party_notice_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                errors.append(
+                    "release mode cannot verify third-party notices from the pinned vendor archive "
+                    f"({type(exc).__name__})"
+                )
+            else:
+                if current_notices != expected_notices:
+                    errors.append("release mode requires up-to-date LICENSES/THIRD-PARTY-NOTICES.md")
     return errors, count, go_count
 
 
@@ -240,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "verify":
         print("INFO: verify mode permits the prealpha tree without a selected project license")
     else:
-        print("PASS: root LICENSE and asset-license manifest are present (terms and provenance are not interpreted)")
+        print("PASS: project LICENSE and asset/third-party notices are present and generated notices are current (terms and provenance are not interpreted)")
         print("NOTE: this result is not release approval, a signed build, or a provenance attestation")
     return 0
 

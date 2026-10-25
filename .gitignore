@@ -20,6 +20,11 @@ dist/
 CMakeFiles/
 CMakeCache.txt
 .cache/
+backend/vendor/
+
+# Test tooling artifacts
+__pycache__/
+*.py[cod]
 
 # Local tooling
 .hermes/

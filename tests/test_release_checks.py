@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +16,30 @@ SPEC = importlib.util.spec_from_file_location("check_release", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
 release_module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release_module)
+
+
+def _write_current_notices(root: Path) -> None:
+    archive_path = root / "backend" / "vendor.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        manifest = b"# example.test/dep v1.0.0\n"
+        manifest_info = tarfile.TarInfo("vendor/modules.txt")
+        manifest_info.size = len(manifest)
+        archive.addfile(manifest_info, io.BytesIO(manifest))
+        license_text = b"Synthetic dependency license.\n"
+        license_info = tarfile.TarInfo("vendor/example.test/dep/LICENSE")
+        license_info.size = len(license_text)
+        archive.addfile(license_info, io.BytesIO(license_text))
+
+    generator_path = ROOT / "scripts" / "generate-third-party-notices.py"
+    generator_spec = importlib.util.spec_from_file_location("release_test_notice_generator", generator_path)
+    if generator_spec is None or generator_spec.loader is None:
+        raise RuntimeError("cannot load third-party notice generator")
+    generator = importlib.util.module_from_spec(generator_spec)
+    sys.modules[generator_spec.name] = generator
+    generator_spec.loader.exec_module(generator)
+    notice_path = root / "LICENSES" / "THIRD-PARTY-NOTICES.md"
+    notice_path.parent.mkdir(parents=True, exist_ok=True)
+    notice_path.write_text(generator.render_notices(root), encoding="utf-8")
 
 
 class ReleaseCheckTests(unittest.TestCase):
@@ -78,6 +104,7 @@ class ReleaseCheckTests(unittest.TestCase):
             asset_manifest = root / "LICENSES" / "ASSET-LICENSES.md"
             asset_manifest.parent.mkdir()
             asset_manifest.write_text("Assets are licensed under GPL-3.0-only.\n", encoding="utf-8")
+            _write_current_notices(root)
             errors_verify, _, _ = release_module.evaluate(root, "verify")
             errors_release, _, _ = release_module.evaluate(root, "release")
             self.assertEqual(errors_verify, [])
@@ -85,6 +112,7 @@ class ReleaseCheckTests(unittest.TestCase):
                 "release mode requires a non-empty root LICENSE; no license has been selected"
             ])
             (root / "LICENSE").write_text("License terms pending maintainer review.\n", encoding="utf-8")
+            _write_current_notices(root)
             errors_release_present, _, _ = release_module.evaluate(root, "release")
             self.assertEqual(errors_release_present, [])
 
@@ -93,10 +121,43 @@ class ReleaseCheckTests(unittest.TestCase):
             root = Path(temporary)
             self._make_repo(root)
             (root / "LICENSE").write_text("GPL-3.0-only\n", encoding="utf-8")
+            (root / "LICENSES").mkdir()
+            _write_current_notices(root)
             errors, _, _ = release_module.evaluate(root, "release")
         self.assertEqual(errors, [
             "release mode requires a non-empty LICENSES/ASSET-LICENSES.md"
         ])
+
+    def test_release_mode_requires_third_party_notices(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_repo(root)
+            (root / "LICENSE").write_text("GPL-3.0-only\n", encoding="utf-8")
+            asset_dir = root / "LICENSES"
+            asset_dir.mkdir()
+            (asset_dir / "ASSET-LICENSES.md").write_text("asset notice\n", encoding="utf-8")
+            errors, _, _ = release_module.evaluate(root, "release")
+        self.assertEqual(errors, [
+            "release mode requires a non-empty LICENSES/THIRD-PARTY-NOTICES.md"
+        ])
+
+    def test_release_mode_rejects_stale_third_party_notices(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._make_repo(root)
+            (root / "LICENSE").write_text("GPL-3.0-only\n", encoding="utf-8")
+            licenses = root / "LICENSES"
+            licenses.mkdir()
+            (licenses / "ASSET-LICENSES.md").write_text("asset grant\n", encoding="utf-8")
+            _write_current_notices(root)
+            (licenses / "THIRD-PARTY-NOTICES.md").write_text("stale notices\n", encoding="utf-8")
+
+            errors, _, _ = release_module.evaluate(root, "release")
+
+        self.assertIn(
+            "release mode requires up-to-date LICENSES/THIRD-PARTY-NOTICES.md",
+            errors,
+        )
 
     def test_cli_returns_failure_without_echoing_secret(self) -> None:
         token = "ghp_" + "B" * 36
