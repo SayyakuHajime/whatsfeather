@@ -35,6 +35,7 @@ python3 "$ROOT/tests/test_verification_isolation.py"
 python3 "$ROOT/tests/test_benchmark_backend.py"
 python3 "$ROOT/tests/test_benchmark_desktop.py"
 python3 "$ROOT/tests/test_release_checks.py"
+python3 "$ROOT/tests/test_arch_package_recipe.py"
 python3 "$ROOT/tests/test_dependency_inventory.py"
 python3 "$ROOT/tests/test_workflow_configuration.py"
 python3 "$ROOT/scripts/check-release.py" --mode verify
