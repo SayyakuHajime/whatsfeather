@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/SayyakuHajime/whatsfeather/backend/internal/app"
 	"github.com/skip2/go-qrcode"
@@ -25,6 +26,8 @@ import (
 	"sync"
 	"time"
 )
+
+var errScopedLiveTestPrivacyBoundaryUnavailable = errors.New("scoped live-test Connect disabled: pinned whatsmeow has no complete enforceable pre-event scope boundary; SDK-side persistence can occur before adapter event filtering")
 
 type Adapter struct {
 	mu     sync.Mutex
@@ -100,6 +103,9 @@ func (a *Adapter) current(c *whatsmeow.Client) bool {
 	return a.client == c
 }
 func (a *Adapter) Connect(ctx context.Context) error {
+	if a.scope != nil {
+		return errScopedLiveTestPrivacyBoundaryUnavailable
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
