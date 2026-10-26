@@ -35,7 +35,7 @@ See [Roadmap](ROADMAP.md) and [Security](SECURITY.md). Calls, full group/channel
 ## Getting Started
 <a id="getting-started"></a>
 
-Requires Linux, Go 1.26+, CMake 3.22+, a C++20 compiler and Qt 6.5+ development modules: Core, Gui, Widgets, Quick, QuickControls2, QuickDialogs2, Network, Multimedia and Test. Current host verification uses Qt 6.12; the older-version CI matrix is not yet verified. Media preparation and synthetic media tests also require `ffmpeg` and `ffprobe`.
+Requires Linux, Go 1.27.3+, CMake 3.22+, a C++20 compiler and Qt 6.5+ development modules: Core, Gui, Widgets, Quick, QuickControls2, QuickDialogs2, Network, Multimedia and Test. Host verification uses Qt 6.12; committed-source CI has also passed on Qt 6.5.3 and 6.8.3. Media preparation and synthetic media tests also require `ffmpeg` and `ffprobe`.
 
 ```bash
 ./scripts/build.sh
@@ -75,6 +75,8 @@ Live mode uses a separate profile and stays disconnected until explicit Connect 
 
 Pairing and selected self-send/community paths have limited test evidence; this is not broad live acceptance. Older-history requests are explicit and bounded to the selected chat; a submitted request is not proof that history was recovered. View-once and disappearing content remains unavailable rather than archived. Voice/video calls remain unavailable.
 
+Strict `--live-test-scope` sessions currently reject Connect before device-store or network access: SDK-internal metadata handling precedes application filters and cannot yet enforce the requested privacy boundary. Ordinary `--live` is not scope-restricted and is not a workaround for a restricted pilot.
+
 <div align="right"><a href="#readme-top">↖ Back to top</a></div>
 
 ---
@@ -91,7 +93,9 @@ python3 scripts/benchmark_desktop.py --runs 3
 
 The canonical verifier uses synthetic isolated profiles, Go race tests/vet, native/controller tests, private RPC, rendered UI checks, relocated install/reinstall and offline source/dependency checks. It prints a unique private evidence directory and does not connect an account. Desktop benchmarking additionally requires X11/XWayland, `xdotool` and `wmctrl`; its readiness/resource observations are not scrolling or browser-comparison benchmarks.
 
-CI configuration is present but is not evidence of a successful hosted run. Release-mode checks require the root LICENSE and asset-license manifest alongside the offline source-secret and Go-checksum gates; they do not interpret license terms, independently verify authorship, audit third-party compatibility, run vulnerability scans, sign artifacts, or attest provenance. Passing these narrow checks does not replace legal, packaging, device or live-service acceptance.
+Headless rendered-video verification needs a working renderer, not only decoded-frame signals. With Xvfb installed, the CI-compatible command is `WHATSFEATHER_VIDEO_QPA_PLATFORM=xcb xvfb-run -a -s '-screen 0 1280x900x24' ./scripts/verify.sh`. Pure offscreen/software rendering does not establish video-pixel acceptance.
+
+[Hosted verification](https://github.com/SayyakuHajime/whatsfeather/actions) includes offline/Go checks and the two Qt baselines; a green run covers its exact committed revision, not later local changes. Release-mode checks require the root LICENSE and asset-license manifest alongside the offline source-secret and Go-checksum gates; they do not interpret license terms, independently verify authorship, audit third-party compatibility, run vulnerability scans, sign artifacts, or attest provenance. Passing these narrow checks does not replace legal, packaging, device or live-service acceptance.
 
 <div align="right"><a href="#readme-top">↖ Back to top</a></div>
 
