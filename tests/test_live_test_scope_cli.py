@@ -4,11 +4,9 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import os
 import select
-import signal
 import socket as unix_socket
 import subprocess
 import tempfile
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = ROOT / "build" / "bin" / "whatsfeather"
@@ -124,9 +122,14 @@ with tempfile.TemporaryDirectory(prefix="wf-live-scope-cli-") as temp:
     assert native_invalid.returncode == 0, native_invalid.stderr
     assert not native_invalid_profile.exists(), "native startup opened a profile before scope validation"
 
-    # A private valid config reaches the daemon listener without connecting WhatsApp.
+    # A valid scoped request must reject an existing plaintext root before
+    # opening the keyring, creating the listener, or mutating the legacy data.
     valid_profile = root / "valid-profile"
-    valid_socket = root / "valid.sock"
+    valid_profile.mkdir(mode=0o700)
+    history = valid_profile / "history.db"
+    legacy_bytes = b"synthetic-legacy-profile-data"
+    history.write_bytes(legacy_bytes)
+    valid_socket = runtime / "valid.sock"
     now = datetime.now(timezone.utc)
     since = (now - timedelta(days=1)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     valid_scope = root / "valid.json"
@@ -135,34 +138,16 @@ with tempfile.TemporaryDirectory(prefix="wf-live-scope-cli-") as temp:
         encoding="utf-8",
     )
     valid_scope.chmod(0o600)
-    implicit_profile = subprocess.run(
-        [str(BINARY), "--live", "--live-test-scope", str(valid_scope), "--quit-after", "1200"],
+    legacy = subprocess.run(
+        [str(DAEMON), "--live", "--live-test-scope", str(valid_scope), "--socket", str(valid_socket), "--data-dir", str(valid_profile)],
         capture_output=True,
         text=True,
         timeout=10,
-        env=native_env,
     )
-    assert implicit_profile.returncode == 2 and "--data-dir" in implicit_profile.stderr, implicit_profile.stderr
-    assert not (root / "data" / "WhatsFeather").exists(), "scoped native startup selected a default profile"
-    daemon = subprocess.Popen(
-        [str(DAEMON), "--live", "--live-test-scope", str(valid_scope), "--socket", str(valid_socket), "--data-dir", str(valid_profile)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+    assert legacy.returncode == 1 and "legacy plaintext" in legacy.stderr, legacy.stderr
+    assert not valid_socket.exists(), "legacy plaintext root reached the daemon listener"
+    assert history.read_bytes() == legacy_bytes, "live startup mutated a legacy plaintext profile"
+    assert not (valid_profile / ".profilevault.json").exists() and not (valid_profile / "cipher").exists(), (
+        "legacy live root was migrated or replaced implicitly"
     )
-    try:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and not valid_socket.exists() and daemon.poll() is None:
-            time.sleep(0.05)
-        assert daemon.poll() is None and valid_socket.exists(), "valid scoped daemon did not reach its private listener"
-        assert valid_profile.is_dir(), "valid scoped daemon did not start the local profile"
-        assert not (valid_profile / "device.db").exists(), "startup unexpectedly opened the WhatsApp device store"
-    finally:
-        if daemon.poll() is None:
-            daemon.send_signal(signal.SIGTERM)
-        try:
-            daemon.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.communicate(timeout=5)
-print("PASS: scoped live mode rejects external backend before profile or socket access")
+print("PASS: scoped live mode rejects external sockets and legacy plaintext roots before storage/transport startup")

@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -480,5 +481,207 @@ func TestScopedRemoteMutationRoutesRequireCurrentRunTarget(t *testing.T) {
 				t.Fatalf("inbound/history target was not blocked: %v", err)
 			}
 		})
+	}
+}
+
+func TestLiveTestScopeCommunityInfoMetadataOnlyScope(t *testing.T) {
+	parent := "synthetic-community-parent@g.us"
+	for _, id := range []string{parent, "synthetic-community-child@g.us", "synthetic-community-announcement@g.us"} {
+		if _, err := types.ParseJID(id); err != nil {
+			t.Fatalf("synthetic community fixture %q is not parser-valid: %v", id, err)
+		}
+	}
+	path := writeScopeConfig(t, `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["`+parent+`"]}`, 0600)
+	scope, err := loadLiveTestScopeAt(path, scopeTestNow())
+	if err != nil {
+		t.Fatalf("metadata-only scope with one canonical parent was rejected: %v", err)
+	}
+	if scope.allowsChat(parent, scopeTestOther) {
+		t.Fatal("community metadata target was also authorized for message/history persistence")
+	}
+	if scope.allowsChat(scopeTestOther, scopeTestOther) {
+		t.Fatal("metadata-only scope admitted self messages when include_self=false")
+	}
+	if !scope.allowsCommunityInfo(parent) || scope.allowsCommunityInfo("synthetic-community-child@g.us") || scope.allowsCommunityInfo("synthetic-community-announcement@g.us") {
+		t.Fatal("community-info scope did not remain exact and separate from the child/announcement groups")
+	}
+	var normalized struct {
+		Chats            []string `json:"chats"`
+		IncludeSelf      bool     `json:"include_self"`
+		CommunityInfoIDs []string `json:"community_info_ids"`
+	}
+	if err = json.Unmarshal(scope.normalizedConfig(), &normalized); err != nil {
+		t.Fatal(err)
+	}
+	if len(normalized.Chats) != 0 || normalized.IncludeSelf || len(normalized.CommunityInfoIDs) != 1 || normalized.CommunityInfoIDs[0] != parent {
+		t.Fatalf("metadata-only scope binding lost or merged the exact target: %#v", normalized)
+	}
+}
+
+func TestMetadataOnlyCommunityScopeDoesNotPersistTargetOrSelfMessages(t *testing.T) {
+	store, err := app.Open(filepath.Join(t.TempDir(), "profile"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	target := "synthetic-community-parent@g.us"
+	targetJID, err := types.ParseJID(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self, err := types.ParseJID(scopeTestOther)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := &LiveTestScope{
+		since: now.Add(-24 * time.Hour), chats: map[string]struct{}{}, communityInfoIDs: map[string]struct{}{target: {}}, includeSelf: false,
+		acceptedMessages: make(map[liveTestMessageKey]struct{}),
+	}
+	adapter := NewWithLiveTestScope(store, t.TempDir(), scope)
+	client := whatsmeow.NewClient(&whatsmeowstore.Device{ID: &self}, nil)
+	adapter.client = client
+	adapter.event(context.Background(), client, &events.Message{
+		Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: targetJID}, ID: "metadata-only-parent-message", Timestamp: now},
+		Message: &waE2E.Message{Conversation: proto.String("must not persist")},
+	})
+	adapter.event(context.Background(), client, &events.Message{
+		Info:    types.MessageInfo{MessageSource: types.MessageSource{Chat: self, IsFromMe: true}, ID: "metadata-only-self-message", Timestamp: now},
+		Message: &waE2E.Message{Conversation: proto.String("self must not persist")},
+	})
+	result, err := store.Handle(context.Background(), "chat.list", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Chats []app.Chat `json:"chats"`
+	}
+	if err = json.Unmarshal(encoded, &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Chats) != 0 {
+		t.Fatalf("metadata-only scope persisted target or self chat/message data: %s", encoded)
+	}
+}
+
+func TestLiveTestScopeCommunityInfoStrictValidationAndStableBinding(t *testing.T) {
+	valid := `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["synthetic-community-parent@g.us"]}`
+	invalidScopes := map[string]string{
+		"empty chat scope without metadata target": `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false}`,
+		"metadata target with missing chats":       `{"since":"2026-10-20T09:25:00Z","include_self":false,"community_info_ids":["synthetic-community-parent@g.us"]}`,
+		"metadata target with null chats":          `{"since":"2026-10-20T09:25:00Z","chats":null,"include_self":false,"community_info_ids":["synthetic-community-parent@g.us"]}`,
+		"metadata target with self enabled":        `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":true,"community_info_ids":["synthetic-community-parent@g.us"]}`,
+		"null metadata target list":                `{"since":"2026-10-20T09:25:00Z","chats":["` + scopeTestChat + `"],"include_self":false,"community_info_ids":null}`,
+		"too many metadata targets":                `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["synthetic-community-parent@g.us","synthetic-community-announcement@g.us"]}`,
+		"duplicate metadata target":                `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["synthetic-community-parent@g.us","synthetic-community-parent@g.us"]}`,
+		"noncanonical metadata target":             `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["SYNTHETIC-COMMUNITY-PARENT@G.US"]}`,
+		"non-group metadata target":                `{"since":"2026-10-20T09:25:00Z","chats":[],"include_self":false,"community_info_ids":["synthetic-community-user@s.whatsapp.net"]}`,
+		"unknown field":                            valid[:len(valid)-1] + `,"unexpected":true}`,
+	}
+	for name, data := range invalidScopes {
+		t.Run(name, func(t *testing.T) {
+			path := writeScopeConfig(t, data, 0600)
+			if _, err := loadLiveTestScopeAt(path, scopeTestNow()); err == nil || err != errInvalidLiveTestScope {
+				t.Fatalf("invalid community-info scope error=%v", err)
+			}
+		})
+	}
+
+	first := `{"since":"2026-10-20T09:25:00Z","chats":["` + scopeTestChat + `","` + scopeTestOther + `"],"include_self":false,"community_info_ids":["synthetic-community-parent@g.us"]}`
+	second := `{"since":"2026-10-20T09:25:00Z","chats":["` + scopeTestOther + `","` + scopeTestChat + `"],"include_self":false,"community_info_ids":["synthetic-community-parent@g.us"]}`
+	firstPath := writeScopeConfig(t, first, 0600)
+	secondPath := writeScopeConfig(t, second, 0600)
+	firstScope, err := loadLiveTestScopeAt(firstPath, scopeTestNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondScope, err := loadLiveTestScopeAt(secondPath, scopeTestNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstScope.normalizedConfig()) != string(secondScope.normalizedConfig()) {
+		t.Fatalf("scope binding depends on input allowlist order: first=%s second=%s", firstScope.normalizedConfig(), secondScope.normalizedConfig())
+	}
+}
+
+type groupInfoClientProbe struct {
+	connected bool
+	loggedIn  bool
+	calls     int
+}
+
+func (p *groupInfoClientProbe) IsConnected() bool { return p.connected }
+func (p *groupInfoClientProbe) IsLoggedIn() bool  { return p.loggedIn }
+func (p *groupInfoClientProbe) GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error) {
+	p.calls++
+	return nil, nil
+}
+
+func TestActualScopedAdapterCommunityInfoIsUnavailableAndNeverDispatched(t *testing.T) {
+	parent := "synthetic-community-parent@g.us"
+	if _, err := types.ParseJID(parent); err != nil {
+		t.Fatalf("synthetic community fixture is not parser-valid: %v", err)
+	}
+	store, err := app.Open(filepath.Join(t.TempDir(), "profile"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	probe := &groupInfoClientProbe{connected: true, loggedIn: true}
+	scope := &LiveTestScope{chats: map[string]struct{}{}, communityInfoIDs: map[string]struct{}{parent: {}}, includeSelf: false}
+	adapter := NewWithLiveTestScope(store, t.TempDir(), scope)
+	adapter.communityInfoClient = probe
+	store.SetTransport(adapter)
+	store.SetStatus("connected", "forced synthetic test state", "")
+
+	result, err := store.Handle(context.Background(), "app.capabilities", []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capabilities struct {
+		Methods  []string                  `json:"methods"`
+		Features map[string]map[string]any `json:"features"`
+	}
+	if err = json.Unmarshal(encoded, &capabilities); err != nil {
+		t.Fatal(err)
+	}
+	advertised := false
+	for _, method := range capabilities.Methods {
+		advertised = advertised || method == "community.info"
+	}
+	feature := capabilities.Features["community-info-target"]
+	if advertised {
+		t.Errorf("actual scoped adapter advertised community.info: %s", encoded)
+	}
+	if feature["available"] != false {
+		t.Errorf("actual scoped adapter reported community-info-target available: %s", encoded)
+	}
+	if feature["reason"] != adapter.ScopedCapabilityBlockReason() {
+		t.Errorf("capability block reason=%v, want transport privacy-boundary reason", feature["reason"])
+	}
+
+	_, routeErr := store.Handle(context.Background(), "community.info", []byte(`{"community_id":"`+parent+`"}`))
+	var apiErr *app.Error
+	if !errors.As(routeErr, &apiErr) || apiErr.Code != "unsupported" {
+		t.Errorf("actual scoped community.info route error=%v, want unsupported", routeErr)
+	}
+	if probe.calls != 0 {
+		t.Errorf("forced-connected actual scoped route called SDK GetGroupInfo %d times", probe.calls)
+	}
+
+	if _, directErr := adapter.GetCommunityInfo(context.Background(), parent); directErr == nil {
+		t.Errorf("actual scoped adapter method did not reject direct community-info access")
+	}
+	if probe.calls != 0 {
+		t.Errorf("direct actual scoped adapter call reached SDK GetGroupInfo %d times", probe.calls)
 	}
 }

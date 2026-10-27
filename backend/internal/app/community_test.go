@@ -541,3 +541,390 @@ func TestCommunityRefreshParticipatesInCloseBarrier(t *testing.T) {
 		t.Fatal(closeErr)
 	}
 }
+
+type communityInfoFake struct {
+	communityNoDirectoryTransport
+	mu           sync.Mutex
+	scoped       bool
+	info         CommunityInfo
+	err          error
+	calls        int
+	refreshCalls int
+	requests     []string
+	entered      chan struct{}
+	release      chan struct{}
+}
+
+func (f *communityInfoFake) ScopedLiveTest() bool { return f.scoped }
+
+func (f *communityInfoFake) GetCommunityInfo(_ context.Context, id string) (CommunityInfo, error) {
+	f.mu.Lock()
+	f.calls++
+	f.requests = append(f.requests, id)
+	info, err, entered, release := f.info, f.err, f.entered, f.release
+	f.mu.Unlock()
+	if entered != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+	}
+	if release != nil {
+		<-release
+	}
+	return info, err
+}
+
+func (f *communityInfoFake) GetJoinedGroups(context.Context) ([]CommunityGroupInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refreshCalls++
+	return nil, nil
+}
+
+func communityInfoAPICode(err error) string {
+	var apiErr *Error
+	if errors.As(err, &apiErr) {
+		return apiErr.Code
+	}
+	return ""
+}
+
+func communityMethodsAndFeature(t *testing.T, a *App) (map[string]bool, map[string]any) {
+	t.Helper()
+	capabilities := invoke(t, a, "app.capabilities", map[string]any{})
+	methods := make(map[string]bool)
+	for _, method := range capabilities["methods"].([]any) {
+		methods[method.(string)] = true
+	}
+	features := capabilities["features"].(map[string]any)
+	return methods, features["community-info-target"].(map[string]any)
+}
+
+func TestCommunityInfoCapabilityAndRouteAreScopedProviderGated(t *testing.T) {
+	target := "synthetic-community-parent@g.us"
+	demo, err := Open(filepath.Join(t.TempDir(), "demo"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer demo.Close()
+	methods, feature := communityMethodsAndFeature(t, demo)
+	if methods["community.info"] || feature["available"] != false {
+		t.Fatalf("demo exposed target community info: methods=%v feature=%#v", methods, feature)
+	}
+	if _, err = demo.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`)); communityInfoAPICode(err) != "unsupported" {
+		t.Fatalf("demo community.info error=%v, want unsupported", err)
+	}
+
+	live, err := Open(filepath.Join(t.TempDir(), "live"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+	ordinary := &communityInfoFake{scoped: false, info: CommunityInfo{ID: target, Title: "Ordinary", IsParent: true}}
+	live.SetTransport(ordinary)
+	live.SetStatus("connected", "test", "")
+	methods, feature = communityMethodsAndFeature(t, live)
+	if methods["community.info"] || !methods["community.refresh"] || feature["available"] != false {
+		t.Fatalf("ordinary live provider exposed target route: methods=%v feature=%#v", methods, feature)
+	}
+	if _, err = live.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`)); communityInfoAPICode(err) != "unsupported" {
+		t.Fatalf("ordinary live community.info error=%v, want unsupported", err)
+	}
+	ordinary.mu.Lock()
+	ordinaryCalls := ordinary.calls
+	ordinary.mu.Unlock()
+	if ordinaryCalls != 0 {
+		t.Fatalf("ordinary transport provider called %d times", ordinaryCalls)
+	}
+
+	scopedWithoutProvider := &scopedCommunityNoInfoTransport{}
+	live.SetTransport(scopedWithoutProvider)
+	methods, feature = communityMethodsAndFeature(t, live)
+	if methods["community.info"] || methods["community.refresh"] || feature["available"] != false {
+		t.Fatalf("scoped transport without provider advertised community routes: methods=%v feature=%#v", methods, feature)
+	}
+
+	scoped := &communityInfoFake{scoped: true, info: CommunityInfo{ID: target, Title: "Pilot Parent", IsParent: true}}
+	live.SetTransport(scoped)
+	live.SetStatus("disconnected", "offline", "")
+	if _, err = live.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`)); communityInfoAPICode(err) != "disconnected" {
+		t.Fatalf("disconnected scoped community.info error=%v, want disconnected", err)
+	}
+	scoped.mu.Lock()
+	disconnectedCalls := scoped.calls
+	scoped.mu.Unlock()
+	if disconnectedCalls != 0 {
+		t.Fatalf("disconnected app invoked community provider %d times", disconnectedCalls)
+	}
+	live.SetStatus("connected", "test", "")
+	methods, feature = communityMethodsAndFeature(t, live)
+	if !methods["community.info"] || methods["community.refresh"] || feature["available"] != true {
+		t.Fatalf("scoped provider route gating incorrect: methods=%v feature=%#v", methods, feature)
+	}
+}
+
+type scopedCommunityNoInfoTransport struct{ communityNoDirectoryTransport }
+
+func (*scopedCommunityNoInfoTransport) ScopedLiveTest() bool { return true }
+
+func TestCommunityInfoResponseIsPrivacyMinimalAndDoesNotTouchCache(t *testing.T) {
+	a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	target := "synthetic-community-parent@g.us"
+	provider := &communityInfoFake{scoped: true, info: CommunityInfo{ID: target, Title: "Pilot Parent", IsParent: true}}
+	a.SetTransport(provider)
+	a.SetStatus("connected", "test", "")
+	beforeCache := communityCacheForTest(t, a)
+	a.mu.Lock()
+	beforeRevision := a.revision
+	a.mu.Unlock()
+	result, err := a.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response map[string]json.RawMessage
+	if err = json.Unmarshal(encoded, &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response) != 4 {
+		t.Fatalf("privacy projection has unexpected fields: %s", encoded)
+	}
+	var got map[string]any
+	if err = json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["community_id"] != target || got["title"] != "Pilot Parent" || got["is_parent"] != true || got["provenance"] != "live_target" {
+		t.Fatalf("unexpected community info projection: %s", encoded)
+	}
+	for _, forbidden := range []string{"participants", "participant_count", "member_count", "members", "owner", "description", "topic"} {
+		if _, exists := response[forbidden]; exists {
+			t.Fatalf("privacy-sensitive field %q leaked: %s", forbidden, encoded)
+		}
+	}
+	provider.mu.Lock()
+	calls, requests := provider.calls, append([]string(nil), provider.requests...)
+	provider.mu.Unlock()
+	if calls != 1 || len(requests) != 1 || requests[0] != target {
+		t.Fatalf("provider calls/targets = %d/%v, want one exact target", calls, requests)
+	}
+	a.mu.Lock()
+	afterRevision := a.revision
+	a.mu.Unlock()
+	if beforeRevision != afterRevision {
+		t.Fatalf("community.info changed app cache revision: %d -> %d", beforeRevision, afterRevision)
+	}
+	if afterCache := communityCacheForTest(t, a); string(beforeCache) != string(afterCache) {
+		t.Fatalf("community.info changed community cache: before=%s after=%s", beforeCache, afterCache)
+	}
+}
+
+func TestCommunityInfoStrictRequestAndProviderValidation(t *testing.T) {
+	target := "synthetic-community-parent@g.us"
+	if !validCommunityJID("synthetic-community-other@g.us") {
+		t.Fatal("synthetic mismatched community fixture is not parser-valid")
+	}
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"missing", `{}`},
+		{"unknown field", `{"community_id":"` + target + `","extra":true}`},
+		{"duplicate field", `{"community_id":"` + target + `","community_id":"` + target + `"}`},
+		{"wrong type", `{"community_id":1}`},
+		{"noncanonical", `{"community_id":"` + strings.ToUpper(target) + `"}`},
+		{"malformed", `{"community_id":"not-a-group"}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			provider := &communityInfoFake{scoped: true, info: CommunityInfo{ID: target, Title: "Parent", IsParent: true}}
+			a.SetTransport(provider)
+			a.SetStatus("connected", "test", "")
+			_, err = a.Handle(context.Background(), "community.info", json.RawMessage(test.raw))
+			if communityInfoAPICode(err) != "invalid_params" {
+				t.Fatalf("strict request error=%v, want invalid_params", err)
+			}
+			provider.mu.Lock()
+			calls := provider.calls
+			provider.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("invalid request invoked provider %d times", calls)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		info CommunityInfo
+		err  error
+		code string
+	}{
+		{"mismatched ID", CommunityInfo{ID: "synthetic-community-other@g.us", Title: "Wrong", IsParent: true}, nil, "community_info_mismatch"},
+		{"not parent", CommunityInfo{ID: target, Title: "Child", IsParent: false}, nil, "not_community_parent"},
+		{"invalid title", CommunityInfo{ID: target, Title: "bad\nname", IsParent: true}, nil, "invalid_metadata"},
+		{"provider error", CommunityInfo{}, errors.New("synthetic provider failure"), "community_info_failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			provider := &communityInfoFake{scoped: true, info: test.info, err: test.err}
+			a.SetTransport(provider)
+			a.SetStatus("connected", "test", "")
+			_, err = a.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`))
+			if got := communityInfoAPICode(err); got != test.code {
+				t.Fatalf("provider metadata error code=%q err=%v, want %q", got, err, test.code)
+			}
+		})
+	}
+}
+
+func TestCommunityInfoRejectsStaleCanceledAndClosingSessions(t *testing.T) {
+	target := "synthetic-community-parent@g.us"
+	newProvider := func() *communityInfoFake {
+		return &communityInfoFake{
+			scoped: true, info: CommunityInfo{ID: target, Title: "Parent", IsParent: true},
+			entered: make(chan struct{}, 1), release: make(chan struct{}),
+		}
+	}
+	t.Run("stale session", func(t *testing.T) {
+		a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		provider := newProvider()
+		a.SetTransport(provider)
+		a.SetStatus("connected", "test", "")
+		done := make(chan error, 1)
+		go func() {
+			_, callErr := a.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`))
+			done <- callErr
+		}()
+		select {
+		case <-provider.entered:
+		case <-time.After(time.Second):
+			t.Fatal("community.info did not enter provider")
+		}
+		a.SetTransport(&communityNoDirectoryTransport{})
+		close(provider.release)
+		if code := communityInfoAPICode(<-done); code != "stale_session" {
+			t.Fatalf("stale provider result code=%q, want stale_session", code)
+		}
+	})
+
+	t.Run("canceled context", func(t *testing.T) {
+		a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer a.Close()
+		provider := newProvider()
+		a.SetTransport(provider)
+		a.SetStatus("connected", "test", "")
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, callErr := a.Handle(ctx, "community.info", json.RawMessage(`{"community_id":"`+target+`"}`))
+			done <- callErr
+		}()
+		select {
+		case <-provider.entered:
+		case <-time.After(time.Second):
+			t.Fatal("community.info did not enter provider")
+		}
+		cancel()
+		close(provider.release)
+		if callErr := <-done; !errors.Is(callErr, context.Canceled) {
+			t.Fatalf("canceled provider result=%v, want context.Canceled", callErr)
+		}
+	})
+
+	t.Run("app shutdown barrier", func(t *testing.T) {
+		a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider := newProvider()
+		a.SetTransport(provider)
+		a.SetStatus("connected", "test", "")
+		requestDone := make(chan error, 1)
+		go func() {
+			_, callErr := a.Handle(context.Background(), "community.info", json.RawMessage(`{"community_id":"`+target+`"}`))
+			requestDone <- callErr
+		}()
+		select {
+		case <-provider.entered:
+		case <-time.After(time.Second):
+			t.Fatal("community.info did not enter provider")
+		}
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- a.Close() }()
+		deadline := time.After(time.Second)
+		for {
+			a.mu.Lock()
+			closing := a.closing
+			a.mu.Unlock()
+			if closing {
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatal("Close did not acquire teardown ownership")
+			default:
+				time.Sleep(time.Millisecond)
+			}
+		}
+		select {
+		case closeErr := <-closeDone:
+			t.Fatalf("Close passed an active community info operation: %v", closeErr)
+		case <-time.After(25 * time.Millisecond):
+		}
+		close(provider.release)
+		if code := communityInfoAPICode(<-requestDone); code != "app_closing" {
+			t.Fatalf("request during shutdown code=%q, want app_closing", code)
+		}
+		if closeErr := <-closeDone; closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	})
+}
+
+func TestScopedCommunityRefreshRejectedBeforeDirectoryProvider(t *testing.T) {
+	a, err := Open(filepath.Join(t.TempDir(), "profile"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	provider := &communityInfoFake{scoped: true, info: CommunityInfo{ID: "synthetic-community-parent@g.us", Title: "Parent", IsParent: true}}
+	a.SetTransport(provider)
+	a.SetStatus("connected", "test", "")
+	methods, _ := communityMethodsAndFeature(t, a)
+	if methods["community.refresh"] {
+		t.Fatal("scoped capabilities advertised broad community.refresh")
+	}
+	if err = refreshCommunityForTest(t, a); communityInfoAPICode(err) != "unsupported" {
+		t.Fatalf("scoped community.refresh error=%v, want unsupported", err)
+	}
+	provider.mu.Lock()
+	calls := provider.refreshCalls
+	provider.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("scoped refresh invoked broad directory provider %d times", calls)
+	}
+}

@@ -17,20 +17,22 @@ import (
 )
 
 const (
-	liveTestScopeMaxBytes       = 16 << 10
-	liveTestScopeMaxChats       = 4
-	liveTestScopeMaxMediaItems  = 5
-	liveTestScopeMaxMediaBytes  = 20 << 20
-	liveTestScopeMaxReceiptIDs  = 10000
-	liveTestScopeWindowDuration = 7 * 24 * time.Hour
+	liveTestScopeMaxBytes            = 16 << 10
+	liveTestScopeMaxChats            = 4
+	liveTestScopeMaxCommunityInfoIDs = 1
+	liveTestScopeMaxMediaItems       = 5
+	liveTestScopeMaxMediaBytes       = 20 << 20
+	liveTestScopeMaxReceiptIDs       = 10000
+	liveTestScopeWindowDuration      = 7 * 24 * time.Hour
 )
 
 var errInvalidLiveTestScope = errors.New("invalid live-test scope")
 
 type liveTestScopeConfig struct {
-	Since       string   `json:"since"`
-	Chats       []string `json:"chats"`
-	IncludeSelf *bool    `json:"include_self"`
+	Since            string   `json:"since"`
+	Chats            []string `json:"chats"`
+	CommunityInfoIDs []string `json:"community_info_ids,omitempty"`
+	IncludeSelf      *bool    `json:"include_self"`
 }
 
 type liveTestMessageKey struct {
@@ -41,9 +43,10 @@ type liveTestMessageKey struct {
 // LiveTestScope is immutable except for bounded per-process receipt/media state.
 // A scope is loaded once by the daemon, before it opens the profile or device DB.
 type LiveTestScope struct {
-	since       time.Time
-	chats       map[string]struct{}
-	includeSelf bool
+	since            time.Time
+	chats            map[string]struct{}
+	communityInfoIDs map[string]struct{}
+	includeSelf      bool
 
 	mu               sync.Mutex
 	acceptedMessages map[liveTestMessageKey]struct{}
@@ -109,8 +112,18 @@ func loadLiveTestScopeAt(path string, now time.Time) (*LiveTestScope, error) {
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, errInvalidLiveTestScope
 	}
+	var rawConfig map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawConfig); err != nil {
+		return nil, errInvalidLiveTestScope
+	}
+	if rawIDs, present := rawConfig["community_info_ids"]; present {
+		var explicitIDs []json.RawMessage
+		if json.Unmarshal(rawIDs, &explicitIDs) != nil || explicitIDs == nil {
+			return nil, errInvalidLiveTestScope
+		}
+	}
 	if config.Since == "" || !strings.HasSuffix(config.Since, "Z") || config.IncludeSelf == nil ||
-		len(config.Chats) == 0 || len(config.Chats) > liveTestScopeMaxChats {
+		len(config.Chats) > liveTestScopeMaxChats || len(config.CommunityInfoIDs) > liveTestScopeMaxCommunityInfoIDs {
 		return nil, errInvalidLiveTestScope
 	}
 	since, err := time.Parse(time.RFC3339Nano, config.Since)
@@ -130,8 +143,29 @@ func loadLiveTestScopeAt(path string, now time.Time) (*LiveTestScope, error) {
 		}
 		chats[value] = struct{}{}
 	}
+	communityInfoIDs := make(map[string]struct{}, len(config.CommunityInfoIDs))
+	for _, value := range config.CommunityInfoIDs {
+		if !validScopedCommunityInfoID(value) {
+			return nil, errInvalidLiveTestScope
+		}
+		if _, duplicate := communityInfoIDs[value]; duplicate {
+			return nil, errInvalidLiveTestScope
+		}
+		communityInfoIDs[value] = struct{}{}
+	}
+	metadataOnly := len(chats) == 0 && len(communityInfoIDs) > 0 && !*config.IncludeSelf
+	if len(chats) == 0 {
+		if !metadataOnly {
+			return nil, errInvalidLiveTestScope
+		}
+		rawChats, present := rawConfig["chats"]
+		var explicitChats []json.RawMessage
+		if !present || json.Unmarshal(rawChats, &explicitChats) != nil || explicitChats == nil || len(explicitChats) != 0 {
+			return nil, errInvalidLiveTestScope
+		}
+	}
 	return &LiveTestScope{
-		since: since, chats: chats, includeSelf: *config.IncludeSelf,
+		since: since, chats: chats, communityInfoIDs: communityInfoIDs, includeSelf: *config.IncludeSelf,
 		acceptedMessages: make(map[liveTestMessageKey]struct{}),
 		mutationTargets:  make(map[liveTestMessageKey]struct{}),
 	}, nil
@@ -145,6 +179,15 @@ func allowedScopeChatServer(server string) bool {
 	default:
 		return false
 	}
+}
+
+func validScopedCommunityInfoID(value string) bool {
+	if value == "" || len(value) > 256 || value != strings.ToLower(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	jid, err := types.ParseJID(value)
+	return err == nil && jid.User != "" && jid.Device == 0 && jid.RawAgent == 0 && jid.Integrator == 0 &&
+		jid.Server == types.GroupServer && jid.String() == value
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {
@@ -228,6 +271,14 @@ func (s *LiveTestScope) allowsChat(chat string, connectedSelf ...string) bool {
 		return true
 	}
 	return false
+}
+
+func (s *LiveTestScope) allowsCommunityInfo(id string) bool {
+	if s == nil || !validScopedCommunityInfoID(id) {
+		return false
+	}
+	_, ok := s.communityInfoIDs[id]
+	return ok
 }
 
 func (s *LiveTestScope) allowsTimestamp(timestamp, now time.Time) bool {
@@ -364,7 +415,14 @@ func (s *LiveTestScope) normalizedConfig() []byte {
 		chats = append(chats, chat)
 	}
 	sort.Strings(chats)
-	data, _ := json.Marshal(liveTestScopeConfig{Since: s.since.UTC().Format(time.RFC3339Nano), Chats: chats, IncludeSelf: &s.includeSelf})
+	communityInfoIDs := make([]string, 0, len(s.communityInfoIDs))
+	for id := range s.communityInfoIDs {
+		communityInfoIDs = append(communityInfoIDs, id)
+	}
+	sort.Strings(communityInfoIDs)
+	data, _ := json.Marshal(liveTestScopeConfig{
+		Since: s.since.UTC().Format(time.RFC3339Nano), Chats: chats, CommunityInfoIDs: communityInfoIDs, IncludeSelf: &s.includeSelf,
+	})
 	return data
 }
 

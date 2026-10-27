@@ -1,6 +1,9 @@
 #include <QtTest>
 #include <QTemporaryDir>
 #include <QSettings>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include "jsonmodel.h"
 #include "communityfoldermodel.h"
 #include "controller.h"
@@ -13,8 +16,18 @@ class CommunityFoldersTest : public QObject {
   Q_OBJECT
 private slots:
   void refreshRequiresExplicitActionAndReloadsAuthoritativeChats() {
-    QTemporaryDir tmp;QLocalServer server;
-    QVERIFY(server.listen(tmp.filePath("f.sock")));
+    QTemporaryDir tmp;
+    const auto runtime = tmp.filePath("runtime");
+    const auto ciphertext = tmp.filePath("ciphertext");
+    const auto profileRoot = QDir(runtime).filePath("wf-pv-synthetic");
+    for (const auto &path : {runtime, ciphertext, profileRoot}) {
+      QVERIFY(QDir().mkpath(path));
+      QVERIFY(QFile::setPermissions(path, QFileDevice::ReadOwner |
+                                            QFileDevice::WriteOwner |
+                                            QFileDevice::ExeOwner));
+    }
+    QLocalServer server;
+    QVERIFY(server.listen(QDir(runtime).filePath("f.sock")));
     int refreshes=0,chatReads=0;bool fixtureDemo=false;
     connect(&server,&QLocalServer::newConnection,&server,[&]{
       auto *peer=server.nextPendingConnection();
@@ -22,7 +35,7 @@ private slots:
         while(peer->canReadLine()){
           const auto req=QJsonDocument::fromJson(peer->readLine()).object();
           const auto method=req.value("method").toString();QJsonObject result;
-          if(method=="app.status") result={{"mode",fixtureDemo?"demo":"live"},{"state","connected"},{"revision",1},{"account",QJsonObject{{"available",false}}}};
+          if(method=="app.status") result={{"mode",fixtureDemo?"demo":"live"},{"state","connected"},{"revision",1},{"account",QJsonObject{{"available",false}}},{"storage_view",QJsonObject{{"version",1},{"mode","encrypted"},{"ciphertext_root",ciphertext},{"runtime_dir",runtime},{"profile_root",profileRoot},{"view_id","0123456789abcdef0123456789abcdef"},{"mount_id","42"}}}};
           else if(method=="app.capabilities")result={{"version",1},{"methods",QJsonArray{"community.refresh","chat.list"}}};
           else if(method=="community.refresh"){++refreshes;result={{"refreshed",true},{"source","live_cache"}};}
           else if(method=="chat.list"){
@@ -34,8 +47,16 @@ private slots:
         }
       });
     });
-    Controller controller;CommunityFolderModel tree;tree.setSourceModel(controller.chats());
-    controller.start(server.fullServerName(),tmp.filePath("fake-profile"),true);
+    Controller controller(nullptr, {}, [](const QString &,
+                                          const QString &runtimeDir,
+                                          const QString &mountedRoot,
+                                          const QString &mountId,
+                                          QString *) {
+      return mountId == QStringLiteral("42") &&
+             QFileInfo(mountedRoot).absolutePath() == runtimeDir;
+    });
+    CommunityFolderModel tree;tree.setSourceModel(controller.chats());
+    controller.start(server.fullServerName(),ciphertext,true);
     QTRY_VERIFY(controller.capabilitiesReady());QTRY_COMPARE(controller.connectionState(),QString("connected"));
     QCOMPARE(refreshes,0);QCOMPARE(tree.rowCount(),0);const int readsBefore=chatReads;
     bool accepted=false;
@@ -45,8 +66,12 @@ private slots:
     QTRY_COMPARE(refreshes,1);QTRY_VERIFY(!controller.property("communitiesRefreshing").toBool());
     QTRY_VERIFY(chatReads>readsBefore);QTRY_COMPARE(tree.rowCount(),1);
     QCOMPARE(tree.row(0).value("title").toString(),QString("Campus"));
-    fixtureDemo=true;QTRY_VERIFY(controller.demo());
-    accepted=true;QVERIFY(QMetaObject::invokeMethod(&controller,"refreshCommunities",Qt::DirectConnection,Q_RETURN_ARG(bool,accepted)));QVERIFY(!accepted);QCOMPARE(refreshes,1);
+    fixtureDemo=true;
+    QTRY_VERIFY(!controller.demo());
+    QTRY_VERIFY(!controller.encryptedProfileViewReady());
+    accepted=true;
+    QVERIFY(QMetaObject::invokeMethod(&controller,"refreshCommunities",Qt::DirectConnection,Q_RETURN_ARG(bool,accepted)));
+    QVERIFY(!accepted);QCOMPARE(refreshes,1);
   }
   void unknownParentsAndDuplicateRowsDoNotHideChats() {
     JsonModel source;

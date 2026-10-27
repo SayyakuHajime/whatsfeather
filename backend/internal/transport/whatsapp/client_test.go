@@ -3,12 +3,16 @@ package whatsapp
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,7 +24,91 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"modernc.org/sqlite"
 )
+
+func TestSyntheticDeviceStoreUsesMemoryTempStore(t *testing.T) {
+	ctx := context.Background()
+	database := filepath.Join(t.TempDir(), "device.db")
+	var mu sync.Mutex
+	var observed []int64
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, database) {
+			return nil
+		}
+		rows, err := conn.QueryContext(ctx, "PRAGMA temp_store", nil)
+		if err != nil {
+			return err
+		}
+		values := make([]driver.Value, 1)
+		if err = rows.Next(values); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err = rows.Close(); err != nil {
+			return err
+		}
+		value, ok := values[0].(int64)
+		if !ok {
+			return fmt.Errorf("unexpected PRAGMA temp_store result %T", values[0])
+		}
+		mu.Lock()
+		observed = append(observed, value)
+		mu.Unlock()
+		return nil
+	})
+
+	store, err := openDeviceStore(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err = store.GetFirstDevice(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Exercise two simultaneous physical connections through the same DSN that
+	// backs the production store, rather than trusting one startup PRAGMA.
+	connectionDB, err := sql.Open("sqlite", deviceStoreURI(filepath.Join(t.TempDir(), "pooled.db")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connectionDB.Close()
+	connectionDB.SetMaxOpenConns(2)
+	connections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		conn, connErr := connectionDB.Conn(ctx)
+		if connErr != nil {
+			t.Fatal(connErr)
+		}
+		connections = append(connections, conn)
+	}
+	for i, conn := range connections {
+		var tempStore int
+		if err = conn.QueryRowContext(ctx, "PRAGMA temp_store").Scan(&tempStore); err != nil {
+			t.Fatal(err)
+		}
+		if tempStore != 2 {
+			t.Errorf("pooled device SQLite connection %d temp_store=%d, want MEMORY (2)", i, tempStore)
+		}
+	}
+	mu.Lock()
+	settings := append([]int64(nil), observed...)
+	mu.Unlock()
+	if len(settings) == 0 {
+		t.Fatal("synthetic device store did not open a SQLite connection")
+	}
+	for i, tempStore := range settings {
+		if tempStore != 2 {
+			t.Errorf("device SQLite connection %d temp_store=%d, want MEMORY (2)", i, tempStore)
+		}
+	}
+}
 
 func TestLocalDisconnectClosesStoreHandleButPreservesLinkedDevice(t *testing.T) {
 	ctx := context.Background()

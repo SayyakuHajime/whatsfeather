@@ -27,16 +27,23 @@ import (
 	"time"
 )
 
+type groupInfoClient interface {
+	IsConnected() bool
+	IsLoggedIn() bool
+	GetGroupInfo(context.Context, types.JID) (*types.GroupInfo, error)
+}
+
 var errScopedLiveTestPrivacyBoundaryUnavailable = errors.New("scoped live-test Connect disabled: pinned whatsmeow has no complete enforceable pre-event scope boundary; SDK-side persistence can occur before adapter event filtering")
 
 type Adapter struct {
-	mu     sync.Mutex
-	app    *app.App
-	dir    string
-	scope  *LiveTestScope
-	client *whatsmeow.Client
-	store  *sqlstore.Container
-	cancel context.CancelFunc
+	mu                  sync.Mutex
+	app                 *app.App
+	dir                 string
+	scope               *LiveTestScope
+	client              *whatsmeow.Client
+	communityInfoClient groupInfoClient
+	store               *sqlstore.Container
+	cancel              context.CancelFunc
 }
 
 func New(a *app.App, dir string) *Adapter { return &Adapter{app: a, dir: dir} }
@@ -45,6 +52,13 @@ func NewWithLiveTestScope(a *app.App, dir string, scope *LiveTestScope) *Adapter
 }
 
 func (a *Adapter) ScopedLiveTest() bool { return a.scope != nil }
+
+func (a *Adapter) ScopedCapabilityBlockReason() string {
+	if a.scope == nil {
+		return ""
+	}
+	return errScopedLiveTestPrivacyBoundaryUnavailable.Error()
+}
 
 func (a *Adapter) scopeSelf(c *whatsmeow.Client) string {
 	if c == nil || c.Store == nil {
@@ -102,6 +116,14 @@ func (a *Adapter) current(c *whatsmeow.Client) bool {
 	defer a.mu.Unlock()
 	return a.client == c
 }
+func deviceStoreURI(path string) string {
+	return "file:" + path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=temp_store(MEMORY)"
+}
+
+func openDeviceStore(ctx context.Context, path string) (*sqlstore.Container, error) {
+	return sqlstore.New(ctx, "sqlite", deviceStoreURI(path), nil)
+}
+
 func (a *Adapter) Connect(ctx context.Context) error {
 	if a.scope != nil {
 		return errScopedLiveTestPrivacyBoundaryUnavailable
@@ -109,7 +131,9 @@ func (a *Adapter) Connect(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	a.Disconnect()
+	if err := a.DisconnectWithError(); err != nil {
+		return fmt.Errorf("close previous WhatsApp adapter state: %w", err)
+	}
 	path := filepath.Join(a.dir, "device.db")
 	if st, e := os.Lstat(path); e == nil && (!st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0) {
 		return fmt.Errorf("unsafe device database")
@@ -123,7 +147,7 @@ func (a *Adapter) Connect(ctx context.Context) error {
 		return e
 	}
 	run, cancel := context.WithCancel(ctx)
-	store, e := sqlstore.New(run, "sqlite", "file:"+path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", nil)
+	store, e := openDeviceStore(run, path)
 	if e != nil {
 		cancel()
 		return e
@@ -131,13 +155,13 @@ func (a *Adapter) Connect(ctx context.Context) error {
 	device, e := store.GetFirstDevice(run)
 	if e != nil {
 		cancel()
-		store.Close()
-		return e
+		return errors.Join(e, store.Close())
 	}
 	c := whatsmeow.NewClient(device, nil)
 	c.EnableAutoReconnect = true
 	a.mu.Lock()
 	a.client = c
+	a.communityInfoClient = c
 	a.store = store
 	a.cancel = cancel
 	a.mu.Unlock()
@@ -149,8 +173,7 @@ func (a *Adapter) Connect(ctx context.Context) error {
 	if c.Store.ID == nil {
 		channel, e := c.GetQRChannel(run)
 		if e != nil {
-			a.Disconnect()
-			return e
+			return errors.Join(e, a.DisconnectWithError())
 		}
 		go func() {
 			for item := range channel {
@@ -162,8 +185,7 @@ func (a *Adapter) Connect(ctx context.Context) error {
 		}()
 	}
 	if e = c.ConnectContext(run); e != nil {
-		a.Disconnect()
-		return e
+		return errors.Join(e, a.DisconnectWithError())
 	}
 	return nil
 }
@@ -189,10 +211,16 @@ func (a *Adapter) publishQRStatus(ctx context.Context, event, code string) bool 
 }
 
 func (a *Adapter) Disconnect() {
+	_ = a.DisconnectWithError()
+}
+
+// DisconnectWithError closes the adapter's owned SQL store after stopping the
+// transport. App.Close uses this optional error-aware path before unmounting.
+func (a *Adapter) DisconnectWithError() error {
 	a.mu.Lock()
 	c, store, cancel := a.client, a.store, a.cancel
 	a.client = nil
-	a.store = nil
+	a.communityInfoClient = nil
 	a.cancel = nil
 	a.mu.Unlock()
 	if cancel != nil {
@@ -201,9 +229,18 @@ func (a *Adapter) Disconnect() {
 	if c != nil {
 		c.Disconnect()
 	}
-	if store != nil {
-		store.Close()
+	if store == nil {
+		return nil
 	}
+	if err := store.Close(); err != nil {
+		return err
+	}
+	a.mu.Lock()
+	if a.store == store {
+		a.store = nil
+	}
+	a.mu.Unlock()
+	return nil
 }
 func (a *Adapter) Account(ctx context.Context) (app.Account, error) {
 	a.mu.Lock()
@@ -1170,6 +1207,73 @@ func communityGroupsFromSDK(groups []*types.GroupInfo) []app.CommunityGroupInfo 
 		})
 	}
 	return result
+}
+
+func (a *Adapter) currentCommunityInfoClient(c groupInfoClient) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.communityInfoClient != c {
+		return false
+	}
+	if client, ok := c.(*whatsmeow.Client); ok {
+		return a.client == client
+	}
+	return true
+}
+
+// GetCommunityInfo is fail-closed while scoped live-test mode lacks an
+// enforceable pre-event privacy boundary. GetGroupInfo may cache participant
+// JIDs and redacted-phone mappings inside the pinned SDK, so the minimal
+// projection is not sufficient to make this lookup safe.
+func (a *Adapter) GetCommunityInfo(ctx context.Context, communityID string) (app.CommunityInfo, error) {
+	if a.scope == nil {
+		return app.CommunityInfo{}, fmt.Errorf("community info is disabled outside scoped live-test mode")
+	}
+	if a.ScopedCapabilityBlockReason() != "" {
+		return app.CommunityInfo{}, errScopedLiveTestPrivacyBoundaryUnavailable
+	}
+	if !validScopedCommunityInfoID(communityID) {
+		return app.CommunityInfo{}, fmt.Errorf("invalid community info target")
+	}
+	if !a.scope.allowsCommunityInfo(communityID) {
+		return app.CommunityInfo{}, fmt.Errorf("community info target is not allowlisted")
+	}
+	if ctx == nil || ctx.Err() != nil {
+		if ctx != nil {
+			return app.CommunityInfo{}, ctx.Err()
+		}
+		return app.CommunityInfo{}, fmt.Errorf("community info request canceled")
+	}
+	a.mu.Lock()
+	c := a.communityInfoClient
+	a.mu.Unlock()
+	if c == nil {
+		return app.CommunityInfo{}, fmt.Errorf("not connected")
+	}
+	if !a.currentCommunityInfoClient(c) {
+		return app.CommunityInfo{}, fmt.Errorf("WhatsApp client was replaced before community info lookup")
+	}
+	if !c.IsConnected() || !c.IsLoggedIn() {
+		return app.CommunityInfo{}, fmt.Errorf("not connected")
+	}
+	jid, err := types.ParseJID(communityID)
+	if err != nil {
+		return app.CommunityInfo{}, fmt.Errorf("invalid community info target")
+	}
+	group, lookupErr := c.GetGroupInfo(ctx, jid)
+	if ctx.Err() != nil {
+		return app.CommunityInfo{}, ctx.Err()
+	}
+	if !a.currentCommunityInfoClient(c) || !c.IsConnected() || !c.IsLoggedIn() {
+		return app.CommunityInfo{}, fmt.Errorf("WhatsApp client was replaced or disconnected during community info lookup")
+	}
+	if lookupErr != nil {
+		return app.CommunityInfo{}, lookupErr
+	}
+	if group == nil || group.JID.String() != communityID {
+		return app.CommunityInfo{}, fmt.Errorf("WhatsApp returned a different community info target")
+	}
+	return app.CommunityInfo{ID: group.JID.String(), Title: group.Name, IsParent: group.GroupParent.IsParent}, nil
 }
 
 // GetJoinedGroups performs no work until the explicit community.refresh route

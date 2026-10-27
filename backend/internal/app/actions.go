@@ -61,6 +61,7 @@ func (a *App) capabilities() map[string]any {
 		"channels":                        {"available": false, "reason": "Channel read routes are not integrated into the typed cache."},
 		"communities":                     {"available": false, "reason": "The broader community hub is not integrated; read-only cached community folders are available separately."},
 		"community-folders":               {"available": true, "reason": "Read-only community folders use pinned SDK GetJoinedGroups metadata; live refresh is explicit and connected-session-only. Demo folders are marked synthetic; no live account compatibility was exercised."},
+		"community-info-target":           {"available": false, "reason": "Target-only community metadata is unavailable outside scoped live-test mode."},
 		"whatsapp-status-stories":         {"available": false, "reason": "Status-view data is not available through the implemented SDK event path."},
 	}
 	_, pollSender := a.transport.(PollVoteSender)
@@ -69,6 +70,32 @@ func (a *App) capabilities() map[string]any {
 	features["poll-results"] = map[string]any{"available": true, "reason": "Backend updates use SDK decryption and private latest-voter storage; message.list exposes bounded aggregate results. Synthetic local evidence only."}
 	features["polls-interactive-messages"]["reason"] = "Backend poll voting and aggregate results exist; poll creation and interactive actions are not exposed."
 	features["community-folders"]["reason"] = a.communityFeatureReason()
+	scopedLive := !a.demo && isScopedLiveTestTransport(a.transport)
+	communityInfoAvailable := false
+	communityInfoReason := "Target-only community metadata is unavailable outside scoped live-test mode."
+	if scopedLive {
+		blockReason := scopedCapabilityBlockReason(a.transport)
+		_, hasCommunityInfoProvider := a.transport.(CommunityInfoProvider)
+		communityInfoAvailable = hasCommunityInfoProvider && blockReason == ""
+		if blockReason != "" {
+			communityInfoReason = blockReason
+		} else if communityInfoAvailable {
+			communityInfoReason = "An exact allowlisted community parent can be read by scoped live-test request; the projection omits participants and claims no broader compatibility."
+		} else {
+			communityInfoReason = "Scoped live-test transport lacks the target-only community metadata provider."
+		}
+		filtered := methods[:0]
+		for _, method := range methods {
+			if method != "community.refresh" {
+				filtered = append(filtered, method)
+			}
+		}
+		methods = filtered
+		if communityInfoAvailable {
+			methods = append(methods, "community.info")
+		}
+	}
+	features["community-info-target"] = map[string]any{"available": communityInfoAvailable, "reason": communityInfoReason}
 	if !a.demo && a.transport != nil {
 		_, features["location-messages"]["available"] = a.transport.(LocationSender)
 		if features["location-messages"]["available"] == false {

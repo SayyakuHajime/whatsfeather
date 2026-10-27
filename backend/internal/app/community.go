@@ -1,12 +1,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -84,11 +86,112 @@ func decodeChatListCursor(value string) (chatListCursor, error) {
 }
 
 func validCommunityJID(value string) bool {
-	if value == "" || len(value) > 256 {
+	if value == "" || len(value) > 256 || value != strings.ToLower(value) || strings.TrimSpace(value) != value {
 		return false
 	}
 	jid, err := types.ParseJID(value)
-	return err == nil && jid.Server == types.GroupServer && jid.User != "" && jid.String() == value
+	return err == nil && jid.Server == types.GroupServer && jid.User != "" && jid.Device == 0 && jid.RawAgent == 0 && jid.Integrator == 0 && jid.String() == value
+}
+
+func decodeCommunityInfoRequest(raw json.RawMessage) (string, error) {
+	invalid := func() (string, error) {
+		return "", fail("invalid_params", "Community info request must contain only community_id")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return invalid()
+	}
+	key, err := decoder.Token()
+	field, ok := key.(string)
+	if err != nil || !ok || field != "community_id" {
+		return invalid()
+	}
+	var communityID string
+	if err = decoder.Decode(&communityID); err != nil {
+		return invalid()
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return invalid()
+	}
+	var extra any
+	if err = decoder.Decode(&extra); err != io.EOF {
+		return invalid()
+	}
+	return communityID, nil
+}
+
+func (a *App) communityInfoLocked(ctx context.Context, raw json.RawMessage) (any, error) {
+	communityID, err := decodeCommunityInfoRequest(raw)
+	if err != nil {
+		return nil, err
+	}
+	if !validCommunityJID(communityID) {
+		return nil, fail("invalid_params", "Community ID must be a canonical group JID")
+	}
+	if a.closing || a.closed {
+		return nil, fail("app_closing", "App is closing")
+	}
+	if a.demo || !isScopedLiveTestTransport(a.transport) {
+		return nil, fail("unsupported", "Target-only community info is unavailable outside scoped live-test mode")
+	}
+	if reason := scopedCapabilityBlockReason(a.transport); reason != "" {
+		return nil, fail("unsupported", reason)
+	}
+	if ctx == nil || ctx.Err() != nil {
+		if ctx != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fail("canceled", "Community info request was canceled")
+	}
+	transport := a.transport
+	provider, ok := transport.(CommunityInfoProvider)
+	if !ok {
+		return nil, fail("unsupported", "The scoped transport cannot read target-only community metadata")
+	}
+	if a.state != "connected" || transport == nil {
+		return nil, fail("disconnected", "Connect the scoped live-test session before reading community info")
+	}
+	if !a.communityMu.TryLock() {
+		return nil, fail("busy", "Community metadata work is already in progress")
+	}
+	epoch := a.sessionEpoch
+	a.beginOperationLocked()
+	a.mu.Unlock()
+	info, providerErr := provider.GetCommunityInfo(ctx, communityID)
+	a.mu.Lock()
+	defer func() {
+		a.communityMu.Unlock()
+		a.endOperationLocked()
+	}()
+	if a.closing || a.closed {
+		return nil, fail("app_closing", "App is closing")
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if epoch != a.sessionEpoch || a.transport != transport || a.state != "connected" || !isScopedLiveTestTransport(a.transport) {
+		return nil, fail("stale_session", "Community info belongs to an obsolete WhatsApp session")
+	}
+	if providerErr != nil {
+		return nil, fail("community_info_failed", "Community metadata could not be read")
+	}
+	if info.ID != communityID {
+		return nil, fail("community_info_mismatch", "Community metadata did not match the requested target")
+	}
+	if !info.IsParent {
+		return nil, fail("not_community_parent", "The requested group is not a confirmed community parent")
+	}
+	if !validCommunityTitle(info.Title) {
+		return nil, fail("invalid_metadata", "Community title metadata was invalid")
+	}
+	return map[string]any{
+		"community_id": communityID,
+		"title":        strings.TrimSpace(info.Title),
+		"is_parent":    true,
+		"provenance":   "live_target",
+	}, nil
 }
 
 func validCommunityTitle(value string) bool {
@@ -240,6 +343,9 @@ func (a *App) communityRefreshLocked(ctx context.Context, raw json.RawMessage) (
 	}
 	if a.demo {
 		return nil, fail("unsupported", "Demo community data is synthetic and cannot be refreshed from WhatsApp")
+	}
+	if isScopedLiveTestTransport(a.transport) {
+		return nil, fail("unsupported", "Broad community refresh is disabled in scoped live-test mode")
 	}
 	if ctx == nil || ctx.Err() != nil {
 		if ctx != nil {
@@ -428,6 +534,9 @@ func (a *App) communityListLocked(ctx context.Context, raw json.RawMessage) (any
 func (a *App) communityFeatureReason() string {
 	if a.demo {
 		return "Showing a synthetic demo community cache; these folders cannot be refreshed from WhatsApp."
+	}
+	if isScopedLiveTestTransport(a.transport) {
+		return "Scoped live-test mode blocks broad community refresh; community.list remains a read-only local cache view."
 	}
 	_, supportsRefresh := a.transport.(CommunityDirectory)
 	var refreshedAt, source string

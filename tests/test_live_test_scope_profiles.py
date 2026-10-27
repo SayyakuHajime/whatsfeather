@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
-"""Synthetic-only profile binding regressions for scoped live-test mode."""
+"""Fail-closed CLI checks for scoped live profiles without OS keyring access."""
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import os
-import signal
-import socket
 import subprocess
 import tempfile
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 DAEMON = ROOT / "build" / "bin" / "whatsfeatherd"
@@ -25,38 +21,12 @@ def scope_file(path: Path, day_offset: int = 1) -> Path:
     return path
 
 
-def launch(scope: Path | None, profile: Path, sock: Path, mode: str = "--live"):
+def run(scope: Path | None, profile: Path, sock: Path, mode: str = "--live"):
     argv = [str(DAEMON), mode]
     if scope is not None:
         argv += ["--live-test-scope", str(scope)]
     argv += ["--socket", str(sock), "--data-dir", str(profile)]
-    return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-
-def stop(process: subprocess.Popen):
-    if process.poll() is None:
-        process.send_signal(signal.SIGTERM)
-    try:
-        return process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        return process.communicate(timeout=5)
-
-
-def reject(process: subprocess.Popen):
-    try:
-        return process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate(timeout=5)
-        raise AssertionError(f"expected preflight rejection but process stayed live: {stdout}{stderr}")
-
-
-def wait_ready(process: subprocess.Popen, sock: Path):
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and process.poll() is None and not sock.exists():
-        time.sleep(0.025)
-    assert process.poll() is None and sock.exists(), "private synthetic daemon did not start"
+    return subprocess.run(argv, capture_output=True, text=True, timeout=10)
 
 
 if not DAEMON.is_file():
@@ -64,44 +34,47 @@ if not DAEMON.is_file():
 
 with tempfile.TemporaryDirectory(prefix="wf-scope-profile-") as temp:
     root = Path(temp)
+    runtime = root / "runtime"
+    runtime.mkdir(mode=0o700)
     scope = scope_file(root / "scope.json")
-    profile = root / "profile"
-    sock = root / "first.sock"
-    daemon = launch(scope, profile, sock)
-    try:
-        wait_ready(daemon, sock)
-    finally:
-        stdout, stderr = stop(daemon)
-    marker = profile / MARKER
-    assert marker.is_file(), "first scoped startup did not atomically bind a profile marker"
-    assert marker.stat().st_mode & 0o777 == 0o600, "scope marker is not owner-only"
-    assert marker.stat().st_uid == os.getuid(), "scope marker owner differs from current UID"
+    profile = root / "legacy-profile"
+    profile.mkdir(mode=0o700)
+    history = profile / "history.db"
+    original = b"synthetic-legacy-profile-data"
+    history.write_bytes(original)
+    socket_path = runtime / "legacy.sock"
 
-    same = launch(scope, profile, root / "same.sock")
-    try:
-        wait_ready(same, root / "same.sock")
-    finally:
-        stop(same)
+    # Valid scope input is accepted, but it may not cause implicit migration,
+    # key creation, app startup, or listener creation for a plaintext root.
+    legacy = run(scope, profile, socket_path)
+    assert legacy.returncode == 1 and "legacy plaintext" in legacy.stderr, legacy.stderr
+    assert history.read_bytes() == original, "live startup modified legacy history"
+    assert not socket_path.exists(), "legacy profile reached the daemon listener"
+    assert sorted(item.name for item in profile.iterdir()) == ["history.db"], (
+        "legacy rejection created vault metadata, a lock, or other files"
+    )
 
-    changed = scope_file(root / "changed.json", day_offset=2)
-    mismatch = launch(changed, profile, root / "mismatch.sock")
-    _, mismatch_err = reject(mismatch)
-    assert mismatch.returncode != 0 and "scope profile mismatch" in mismatch_err, mismatch_err
-    assert not (root / "mismatch.sock").exists(), "scope mismatch reached the daemon listener"
+    # A scoped-profile marker in a plaintext demo root is also refused before
+    # app.Open; an unscoped live launch still rejects that root as legacy.
+    marked = root / "marked-profile"
+    marked.mkdir(mode=0o700)
+    marker = marked / MARKER
+    marker.write_bytes(b"synthetic-only-scope-marker")
+    marker.chmod(0o600)
+    marked_history = marked / "history.db"
+    marked_history.write_bytes(original)
+    before = {p.name: p.read_bytes() for p in marked.iterdir()}
 
-    legacy = root / "legacy"
-    legacy.mkdir(mode=0o700)
-    sentinel = legacy / "existing-data"
-    sentinel.write_bytes(b"synthetic-only-preserve")
-    rejected = launch(scope, legacy, root / "legacy.sock")
-    _, legacy_err = reject(rejected)
-    assert rejected.returncode != 0 and "scoped profile must be new, empty or already bound" in legacy_err, legacy_err
-    assert sentinel.read_bytes() == b"synthetic-only-preserve", "legacy profile preflight changed its content"
+    demo_socket = runtime / "demo.sock"
+    demo = run(None, marked, demo_socket, mode="--demo")
+    assert demo.returncode == 1 and "scoped profile cannot be opened in ordinary mode" in demo.stderr, demo.stderr
+    assert not demo_socket.exists(), "ordinary demo mode reached the listener for a scoped profile"
+    assert {p.name: p.read_bytes() for p in marked.iterdir()} == before, "demo rejection mutated the profile"
 
-    for mode in ("--demo", "--live"):
-        ordinary = launch(None, profile, root / f"ordinary-{mode[2:]}.sock", mode=mode)
-        _, ordinary_err = reject(ordinary)
-        assert ordinary.returncode != 0 and "scoped profile cannot be opened in ordinary mode" in ordinary_err, ordinary_err
-        assert not (root / f"ordinary-{mode[2:]}.sock").exists(), "ordinary mode reached a marked profile listener"
+    live_socket = runtime / "unscoped-live.sock"
+    ordinary_live = run(None, marked, live_socket, mode="--live")
+    assert ordinary_live.returncode == 1 and "legacy plaintext" in ordinary_live.stderr, ordinary_live.stderr
+    assert not live_socket.exists(), "unscoped live mode reached the listener for a plaintext root"
+    assert {p.name: p.read_bytes() for p in marked.iterdir()} == before, "live rejection mutated the profile"
 
-print("PASS: scoped profile marker, same-scope restart, mismatch, legacy isolation, and ordinary-mode rejection")
+print("PASS: scoped profile CLI rejects plaintext roots without migration, keyring access, or listener startup")
