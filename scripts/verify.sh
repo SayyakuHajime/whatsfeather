@@ -9,6 +9,11 @@ printf 'Verification evidence: %s\n' "$WHATSFEATHER_QA_ROOT"
 "$ROOT/scripts/build.sh"
 (cd "$ROOT/backend" && go test -race ./... && go vet ./...)
 ctest --test-dir "$ROOT/build" --output-on-failure
+case "${WHATSFEATHER_VERIFY_ENCRYPTED_PROFILE:-}" in
+  1) "$ROOT/scripts/verify-encrypted-profile.sh" ;;
+  "") printf 'SKIP: real FUSE/native encrypted-profile acceptance is opt-in; set WHATSFEATHER_VERIFY_ENCRYPTED_PROFILE=1 and WHATSFEATHER_TEST_GCRYPTFS to run it.\n' ;;
+  *) printf 'ERROR: WHATSFEATHER_VERIFY_ENCRYPTED_PROFILE must be 1 when set.\n' >&2; exit 2 ;;
+esac
 python3 "$ROOT/tests/test_theme.py"
 python3 "$ROOT/tests/test_app_icon.py"
 python3 "$ROOT/tests/test_asset_license_manifest.py"
@@ -18,6 +23,7 @@ python3 "$ROOT/tests/integration/test_rpc.py"
 python3 "$ROOT/tests/test_live_test_scope_cli.py"
 python3 "$ROOT/tests/test_live_test_scope_profiles.py"
 python3 "$ROOT/tests/integration/test_desktop.py"
+python3 "$ROOT/tests/integration/test_about_legal_access.py"
 python3 "$ROOT/tests/integration/test_settings_theme_connection.py"
 python3 "$ROOT/tests/integration/test_community_folders.py"
 python3 "$ROOT/tests/integration/test_media_download.py"

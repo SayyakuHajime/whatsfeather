@@ -77,6 +77,20 @@ Pairing and selected self-send/community paths have limited test evidence; this 
 
 Strict `--live-test-scope` sessions currently reject Connect before device-store or network access: SDK-internal metadata handling precedes application filters and cannot yet enforce the requested privacy boundary. Ordinary `--live` is not scope-restricted and is not a workaround for a restricted pilot.
 
+### Offline profile migration
+
+After `./scripts/build.sh`, stop WhatsFeather and run the one-time migration into a new encrypted destination:
+
+```bash
+./build/bin/whatsfeatherd --migrate-live-source /absolute/path/to/legacy-live \
+  --data-dir /absolute/path/to/new-encrypted-vault \
+  --runtime-dir /absolute/path/to/private-runtime
+```
+
+Migration requires and holds the existing `profile.lock` through completion, which excludes normal daemon writers that honor the lock. It cannot stop same-user tools that ignore that lock; a final source rescan rejects observed changes, but keep the source until you verify the result.
+
+If it is interrupted, the destination stays inactive and migration does not resume in place. Copy and hash cancellation is checked between 64 KiB chunks and migration operations; an in-flight kernel read/sync or SQLite call must return before cancellation is observed. Keep the plaintext source and incomplete vault untouched; retry from the same source to a different, never-before-used `--data-dir`. Never delete the source or reset/reuse an existing vault as a retry step. Retain the source until you have independently verified the encrypted profile and your backup.
+
 <div align="right"><a href="#readme-top">↖ Back to top</a></div>
 
 ---
@@ -106,6 +120,6 @@ Headless rendered-video verification needs a working renderer, not only decoded-
 
 Unofficial; not affiliated with, authorized by or endorsed by WhatsApp or Meta. Protocol changes and account restrictions are possible. Local history, media and sessions are not encrypted at rest by this application.
 
-**Project license: GPL-3.0-only** (see [LICENSE](LICENSE)). This applies to original WhatsFeather code and the 32 listed image/vector assets; [ASSET-LICENSES.md](LICENSES/ASSET-LICENSES.md) records the explicit asset grant and file hashes. Asset authorship is owner-self-attested, not independently verified. [THIRD-PARTY-NOTICES.md](LICENSES/THIRD-PARTY-NOTICES.md) reproduces root notice files for pinned vendored Go modules. Qt/runtime components and system packages retain their own licenses; this inventory is not a complete compatibility, provenance, or distribution-compliance review.
+**Project license: GPL-3.0-only** (see [LICENSE](LICENSE)). This applies to original WhatsFeather code and the 32 listed image/vector assets; [ASSET-LICENSES.md](LICENSES/ASSET-LICENSES.md) records the explicit asset grant and file hashes. Asset authorship is owner-self-attested, not independently verified. [THIRD-PARTY-NOTICES.md](LICENSES/THIRD-PARTY-NOTICES.md) reproduces recursively attributed vendored notices and selected modernc generated-source headers, with canonical LGPL-2.1 and GCC Runtime Library Exception 3.1 texts. These observed headers do not settle their applicability to generated declarations; legal/maintainer review of applicability and any static-link/relink route remains open. Corresponding-source availability and reproducible build instructions are also not yet prepared. The runtime inventory marks gocryptfs, libsecret/secret-tool, and fuse3/fusermount3 as required by encrypted mode with packaging pending; Qt metadata license options are alternatives, not a selected license. This inventory is not a complete compatibility, provenance, or distribution-compliance review.
 
 <div align="right"><a href="#readme-top">↖ Back to top</a></div>
