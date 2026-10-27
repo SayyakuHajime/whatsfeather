@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import io
 import sys
 import tarfile
@@ -23,6 +24,12 @@ def _generator_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _install_go_toolchain_license(root: Path) -> None:
+    destination = root / "LICENSES" / "supplemental" / "go-toolchain-LICENSE.txt"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes((ROOT / "LICENSES" / "supplemental" / "go-toolchain-LICENSE.txt").read_bytes())
 
 
 def _write_archive(path: Path, entries: list[tuple[str, bytes]]) -> None:
@@ -49,7 +56,7 @@ class ThirdPartyNoticeTests(unittest.TestCase):
             line for line in manifest.splitlines()
             if line.startswith("# ") and not line.startswith("## ")
         ]
-        self.assertEqual(len(module_entries), 29)
+        self.assertEqual(len(module_entries), 31)
         rendered = NOTICE.read_text(encoding="utf-8")
         for entry in module_entries:
             module_path, version = entry[2:].split()[:2]
@@ -68,6 +75,7 @@ class ThirdPartyNoticeTests(unittest.TestCase):
             root = Path(temporary)
             backend = root / "backend"
             backend.mkdir()
+            _install_go_toolchain_license(root)
             archive_path = backend / "vendor.tar.gz"
             with tarfile.open(archive_path, "w:gz") as archive:
                 manifest = b"# example.test/module v1.2.3\n"
@@ -109,6 +117,7 @@ class ThirdPartyNoticeTests(unittest.TestCase):
             root = Path(temporary)
             backend = root / "backend"
             backend.mkdir()
+            _install_go_toolchain_license(root)
             license_text = b"Example license text\nwith exact bytes.\n"
             copyright_text = b"Copyright 2026 Example Project.\n"
             archive_path = root / "backend" / "vendor.tar.gz"
@@ -263,6 +272,85 @@ class ThirdPartyNoticeTests(unittest.TestCase):
         self.assertIn("Qt and FFmpeg are system-provided, not bundled in the app artifact", rendered)
         self.assertIn("reviewed candidate FFmpeg package's `.PKGINFO` reports `GPL-3.0-or-later`", rendered)
         self.assertIn("does not change the project's authorized `GPL-3.0-only` selection", rendered)
+
+    def test_recovery_dependency_root_licenses_and_patents_are_reproduced(self) -> None:
+        module = _generator_module()
+        expected_paths = (
+            "vendor/filippo.io/age/LICENSE",
+            "vendor/filippo.io/hpke/LICENSE",
+            "vendor/golang.org/x/crypto/PATENTS",
+            "vendor/golang.org/x/sys/PATENTS",
+        )
+        with tarfile.open(ROOT / "backend" / "vendor.tar.gz", "r:gz") as archive:
+            manifest_file = archive.extractfile("vendor/modules.txt")
+            self.assertIsNotNone(manifest_file)
+            assert manifest_file is not None
+            modules = manifest_file.read().decode("utf-8")
+            names = set(archive.getnames())
+            raw_documents = {}
+            for path in expected_paths:
+                file = archive.extractfile(path)
+                self.assertIsNotNone(file, f"missing pinned archive notice: {path}")
+                assert file is not None
+                raw_documents[path] = file.read()
+        self.assertIn("# filippo.io/age v1.3.2", modules)
+        self.assertIn("# filippo.io/hpke v0.4.0", modules)
+        self.assertIn("# golang.org/x/crypto v0.58.0", modules)
+        self.assertIn("# golang.org/x/sys v0.49.0", modules)
+        self.assertTrue(set(expected_paths).issubset(names))
+        # Isolate the new inventory from the previously reviewed modernc archive hash.
+        with patch.object(module, "MODERNC_MODULE", "test.invalid/not-present"):
+            with patch.object(module, "MODERNC_GENERATED_SOURCES", ()):
+                rendered = module.render_notices(ROOT)
+        for path, raw in raw_documents.items():
+            self.assertIn(f"Source path: `{path}`", rendered)
+            self.assertIn(hashlib.sha256(raw).hexdigest(), rendered)
+            self.assertIn(raw.decode("utf-8").rstrip("\n"), rendered)
+
+    def test_age_bech32_inline_permission_notice_is_complete_and_hash_anchored(self) -> None:
+        module = _generator_module()
+        source_path = "vendor/filippo.io/age/internal/bech32/bech32.go"
+        with tarfile.open(ROOT / "backend" / "vendor.tar.gz", "r:gz") as archive:
+            source_file = archive.extractfile(source_path)
+            self.assertIsNotNone(source_file)
+            assert source_file is not None
+            source = source_file.read().decode("utf-8")
+        complete_header = "\n".join(source.splitlines()[:20])
+        with patch.object(module, "MODERNC_MODULE", "test.invalid/not-present"):
+            with patch.object(module, "MODERNC_GENERATED_SOURCES", ()):
+                rendered = module.render_notices(ROOT)
+        self.assertIn("## Reviewed age/bech32 inline source notice", rendered)
+        self.assertIn(source_path, rendered)
+        self.assertIn("b541ad4caca899fb3e11902aa3f478321fe9d623edbf43a76dd306433a7b0436", rendered)
+        self.assertIn(complete_header, rendered)
+        self.assertIn("The above copyright notice and this permission notice shall be included in", rendered)
+
+    def test_go_runtime_license_is_pinned_to_actual_toolchain_identity(self) -> None:
+        module = _generator_module()
+        license_path = ROOT / "LICENSES" / "supplemental" / "go-toolchain-LICENSE.txt"
+        canonical_license = license_path.read_text(encoding="utf-8").rstrip("\n")
+        with patch.object(module, "MODERNC_MODULE", "test.invalid/not-present"):
+            with patch.object(module, "MODERNC_GENERATED_SOURCES", ()):
+                rendered = module.render_notices(ROOT)
+        self.assertIn("## Go runtime toolchain license and source identity", rendered)
+        self.assertIn("Upstream Go source pin: `go1.27.3`", rendered)
+        self.assertIn("Toolchain identity: `go version go1.27.3-X:nodwarf5 linux/amd64`", rendered)
+        self.assertIn("Toolchain executable SHA-256: `21401c8d2dae2e6db0d756f7b9ae5a885ac6c14882cbbe521c6f49b184da8402`", rendered)
+        self.assertIn("GOROOT/VERSION SHA-256: `49b1651ee92b70282766993b556905e9464050a811572e047a74f95534ee9ce6`", rendered)
+        self.assertIn("SHA-256 `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad`", rendered)
+        self.assertIn(canonical_license, rendered)
+        self.assertIn("not a legal approval", rendered)
+
+    def test_age_inline_source_hash_and_archive_size_are_enforced(self) -> None:
+        module = _generator_module()
+        with patch.object(module, "MODERNC_MODULE", "test.invalid/not-present"):
+            with patch.object(module, "AGE_BECH32_SOURCE_SHA256", "0" * 64, create=True):
+                with self.assertRaisesRegex(ValueError, "reviewed generated source changed"):
+                    module.render_notices(ROOT)
+        with patch.object(module, "MODERNC_MODULE", "test.invalid/not-present"):
+            with patch.object(module, "MAX_REVIEWED_GENERATED_SOURCE_BYTES", 100):
+                with self.assertRaisesRegex(ValueError, "reviewed generated source exceeds the size limit"):
+                    module.render_notices(ROOT)
 
     def test_render_rejects_archive_above_compressed_size_limit(self) -> None:
         module = _generator_module()

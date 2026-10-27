@@ -92,7 +92,18 @@ MAX_SUPPLEMENTAL_LICENSE_BYTES = 1024 * 1024
 MODERNC_MODULE = "modernc.org/libc"
 MODERNC_VERSION = "v1.74.4"
 MODERNC_GO_SUM_H1 = "h1:fX1Omw4o2/1C2iRkkIsrQTasJQldLhRmuPreXLoWs9k="
-MODERNC_VENDOR_ARCHIVE_SHA256 = "375718d79147fa821e2672f9bc0b5e25f309a3ad7604ae81ff4850c395d38804"
+MODERNC_VENDOR_ARCHIVE_SHA256 = "5987becd4d02cc9b462767606577053d8c8af9c3d8f9f399431670c44bd0c111"
+AGE_MODULE = "filippo.io/age"
+AGE_VERSION = "v1.3.2"
+AGE_BECH32_SOURCE_PATH = "vendor/filippo.io/age/internal/bech32/bech32.go"
+AGE_BECH32_SOURCE_SHA256 = "b541ad4caca899fb3e11902aa3f478321fe9d623edbf43a76dd306433a7b0436"
+AGE_BECH32_NOTICE_START = "// Copyright (c) 2017 Takatoshi Nakagawa"
+AGE_BECH32_NOTICE_END = "// THE SOFTWARE."
+GO_RUNTIME_SOURCE_PIN = "go1.27.3"
+GO_RUNTIME_SOURCE_URL = "https://go.googlesource.com/go/+/refs/tags/go1.27.3/LICENSE"
+GO_RUNTIME_TOOLCHAIN_ID = "go version go1.27.3-X:nodwarf5 linux/amd64"
+GO_RUNTIME_TOOLCHAIN_BINARY_SHA256 = "21401c8d2dae2e6db0d756f7b9ae5a885ac6c14882cbbe521c6f49b184da8402"
+GO_RUNTIME_VERSION_FILE_SHA256 = "49b1651ee92b70282766993b556905e9464050a811572e047a74f95534ee9ce6"
 MODERNC_GENERATED_SOURCES = (
     (
         "vendor/modernc.org/libc/sys/types/types_linux_amd64.go",
@@ -138,6 +149,12 @@ SUPPLEMENTAL_LICENSES = (
         "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
         "https://gnu.googlesource.com/gcc/+/f71fe877da75e9be746b6bbc27cea8007c83c983/COPYING.RUNTIME",
     ),
+)
+GO_RUNTIME_LICENSE = (
+    "Go toolchain runtime license",
+    "LICENSES/supplemental/go-toolchain-LICENSE.txt",
+    "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    GO_RUNTIME_SOURCE_URL,
 )
 
 
@@ -325,6 +342,14 @@ def _vendored_material(root: Path) -> tuple[list[LicenseDocument], dict[str, str
                 raise ValueError("go.sum does not contain the reviewed modernc module checksum")
 
         expected_sources = {path: digest for path, digest, _ in MODERNC_GENERATED_SOURCES} if has_reviewed_module else {}
+        age_version = modules.get(AGE_MODULE)
+        if age_version is not None:
+            if age_version != AGE_VERSION:
+                raise ValueError(
+                    f"reviewed inline-source coverage requires {AGE_MODULE}@{AGE_VERSION}; "
+                    "review the new vendored version before regeneration"
+                )
+            expected_sources[AGE_BECH32_SOURCE_PATH] = AGE_BECH32_SOURCE_SHA256
         for member in archive_members:
             archive_path_value = _validate_archive_member_name(member.name)
             if member.name in expected_sources:
@@ -462,23 +487,78 @@ def _render_modernc_generated_source_coverage(root: Path, generated_sources: dic
     return lines
 
 
+def _render_age_bech32_source_notice(archive_sha256: str, generated_sources: dict[str, str]) -> list[str]:
+    source = generated_sources.get(AGE_BECH32_SOURCE_PATH)
+    if source is None:
+        return []
+    excerpt = _source_excerpt(
+        source, AGE_BECH32_NOTICE_START, AGE_BECH32_NOTICE_END, AGE_BECH32_SOURCE_PATH
+    )
+    lines = [
+        "## Reviewed age/bech32 inline source notice",
+        "",
+        f"This complete 20-line inline permission notice is reproduced from `{AGE_BECH32_SOURCE_PATH}`",
+        f"in `filippo.io/age@{AGE_VERSION}` inside `backend/vendor.tar.gz` (SHA-256 `{archive_sha256}`).",
+        f"Source SHA-256: `{AGE_BECH32_SOURCE_SHA256}`. The source is size-bounded and its hash is",
+        "checked before this excerpt is rendered. This coverage is for the vendored source notice; it",
+        "does not assert that the source's symbols are retained in a particular executable.",
+        "",
+        "The excerpt is copied verbatim, including source comment markers:",
+        "",
+    ]
+    fence = _fence(excerpt)
+    lines.extend([f"{fence}go", excerpt.rstrip("\n"), fence, ""])
+    return lines
+
+
+def _render_go_runtime_toolchain_coverage(root: Path) -> list[str]:
+    title, content, provenance = _supplemental_license(root, *GO_RUNTIME_LICENSE)
+    lines = [
+        "## Go runtime toolchain license and source identity",
+        "",
+        "This explicit hash-checked supplement is separate from the Go module archive and filename collector.",
+        f"Upstream Go source pin: `{GO_RUNTIME_SOURCE_PIN}` (`go tool dist version`; upstream source tag).",
+        f"Toolchain identity: `{GO_RUNTIME_TOOLCHAIN_ID}`.",
+        f"Toolchain executable SHA-256: `{GO_RUNTIME_TOOLCHAIN_BINARY_SHA256}`.",
+        f"GOROOT/VERSION SHA-256: `{GO_RUNTIME_VERSION_FILE_SHA256}`.",
+        "The toolchain identity above includes the local `X:nodwarf5` build suffix; the upstream source pin",
+        "does not claim that this distribution-specific executable was rebuilt byte-for-byte from the tag.",
+        "",
+        f"Canonical {title} source observed: `/usr/share/licenses/go/LICENSE`; {provenance}.",
+        "The complete canonical distribution license follows:",
+        "",
+    ]
+    fence = _fence(content)
+    lines.extend([f"{fence}text", content.rstrip("\n"), fence, ""])
+    lines.extend(
+        [
+            "This records the canonical toolchain license, not every Go standard-library inline header or",
+            "a symbol-retention analysis of a final product executable. Recheck the exact shipped binary's",
+            "source/runtime notice closure before release. This is not a legal approval.",
+            "",
+        ]
+    )
+    return lines
+
+
 def render_notices(root: Path) -> str:
     documents, generated_sources = _vendored_material(root)
     modules = sorted({(document.module, document.version) for document in documents})
     lines = [
         "# Third-party software notices",
         "",
-        "This file reproduces license, copyright, patent, and notice files located within the vendored Go",
-        "module trees listed in `vendor/modules.txt` in the pinned `backend/vendor.tar.gz` archive. Files",
-        "are attributed to their longest matching vendored-module ancestor. Versions and file contents are",
-        "read from the pinned archive. Run",
-        "`python3 scripts/generate-third-party-notices.py --check` to verify this file.",
+        "This file mechanically reproduces license, copyright, patent, and notice files located within the",
+        "vendored Go module trees listed in `vendor/modules.txt` in the pinned `backend/vendor.tar.gz` archive.",
+        "Root module texts are selected by filename; inline source headers and the Go toolchain license are",
+        "not discovered by that filename collector and are included only in the explicit hash-anchored",
+        "sections below. Run `python3 scripts/generate-third-party-notices.py --check` to verify this file.",
         "",
-        "This is a mechanical attribution inventory, not a legal opinion, a license-compatibility decision,",
-        "source-provenance proof, or approval to redistribute. Original WhatsFeather code and the separately",
-        "listed assets are licensed as described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.",
+        "This is an attribution inventory, not a legal opinion, license-compatibility decision, source-",
+        "provenance proof, or approval to redistribute. Original WhatsFeather code and separately listed",
+        "assets are licensed as described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.",
         "",
         f"Vendored Go modules: {len(modules)}; reproduced vendored notice files: {len(documents)}.",
+        "Those counts exclude the separate hash-anchored source-header and Go toolchain sections.",
         "",
         "## Vendored Go modules",
         "",
@@ -501,6 +581,9 @@ def render_notices(root: Path) -> str:
         lines.extend([f"{fence}text", body.rstrip("\n"), fence, ""])
 
     lines.extend(_render_modernc_generated_source_coverage(root, generated_sources))
+    archive_sha256 = _sha256_file(root / "backend" / "vendor.tar.gz")
+    lines.extend(_render_age_bech32_source_notice(archive_sha256, generated_sources))
+    lines.extend(_render_go_runtime_toolchain_coverage(root))
     lines.extend(
         [
             "## System-provided runtime packages",

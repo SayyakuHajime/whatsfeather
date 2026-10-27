@@ -1,18 +1,57 @@
 # Third-party software notices
 
-This file reproduces license, copyright, patent, and notice files located within the vendored Go
-module trees listed in `vendor/modules.txt` in the pinned `backend/vendor.tar.gz` archive. Files
-are attributed to their longest matching vendored-module ancestor. Versions and file contents are
-read from the pinned archive. Run
-`python3 scripts/generate-third-party-notices.py --check` to verify this file.
+This file mechanically reproduces license, copyright, patent, and notice files located within the
+vendored Go module trees listed in `vendor/modules.txt` in the pinned `backend/vendor.tar.gz` archive.
+Root module texts are selected by filename; inline source headers and the Go toolchain license are
+not discovered by that filename collector and are included only in the explicit hash-anchored
+sections below. Run `python3 scripts/generate-third-party-notices.py --check` to verify this file.
 
-This is a mechanical attribution inventory, not a legal opinion, a license-compatibility decision,
-source-provenance proof, or approval to redistribute. Original WhatsFeather code and the separately
-listed assets are licensed as described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.
+This is an attribution inventory, not a legal opinion, license-compatibility decision, source-
+provenance proof, or approval to redistribute. Original WhatsFeather code and separately listed
+assets are licensed as described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.
 
-Vendored Go modules: 29; reproduced vendored notice files: 43.
+Vendored Go modules: 31; reproduced vendored notice files: 45.
+Those counts exclude the separate hash-anchored source-header and Go toolchain sections.
 
 ## Vendored Go modules
+
+### `filippo.io/age` `v1.3.2` — `LICENSE`
+
+Source path: `vendor/filippo.io/age/LICENSE`
+
+SHA-256: `c5d65279d02955c0fc2294ae417c3add650d228f4f5c82bd6d531fc26c89cd96`
+
+```text
+Copyright 2019 The age Authors
+Copyright 2019 Google LLC
+Copyright 2022 Filippo Valsorda
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of the age project nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
 
 ### `filippo.io/edwards25519` `v1.2.0` — `LICENSE`
 
@@ -34,6 +73,42 @@ copyright notice, this list of conditions and the following disclaimer
 in the documentation and/or other materials provided with the
 distribution.
    * Neither the name of Google Inc. nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### `filippo.io/hpke` `v0.4.0` — `LICENSE`
+
+Source path: `vendor/filippo.io/hpke/LICENSE`
+
+SHA-256: `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad`
+
+```text
+Copyright 2009 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
 contributors may be used to endorse or promote products derived from
 this software without specific prior written permission.
 
@@ -3182,7 +3257,7 @@ SOFTWARE.
 ## Reviewed modernc generated-source header coverage
 
 This bounded review is tied to `modernc.org/libc@v1.74.4` in `backend/vendor.tar.gz` 
-(SHA-256 `375718d79147fa821e2672f9bc0b5e25f309a3ad7604ae81ff4850c395d38804`) and `backend/go.sum` checksum `h1:fX1Omw4o2/1C2iRkkIsrQTasJQldLhRmuPreXLoWs9k=`. 
+(SHA-256 `5987becd4d02cc9b462767606577053d8c8af9c3d8f9f399431670c44bd0c111`) and `backend/go.sum` checksum `h1:fX1Omw4o2/1C2iRkkIsrQTasJQldLhRmuPreXLoWs9k=`. 
 It retains the reviewed Linux/amd64 generated-file header notices only; it is not a scan or 
 license classification of all generated sources.
 
@@ -3897,6 +3972,86 @@ The availability of this Exception does not imply any general
 presumption that third-party software is unaffected by the copyleft
 requirements of the license of GCC.
 ```
+
+## Reviewed age/bech32 inline source notice
+
+This complete 20-line inline permission notice is reproduced from `vendor/filippo.io/age/internal/bech32/bech32.go`
+in `filippo.io/age@v1.3.2` inside `backend/vendor.tar.gz` (SHA-256 `5987becd4d02cc9b462767606577053d8c8af9c3d8f9f399431670c44bd0c111`).
+Source SHA-256: `b541ad4caca899fb3e11902aa3f478321fe9d623edbf43a76dd306433a7b0436`. The source is size-bounded and its hash is
+checked before this excerpt is rendered. This coverage is for the vendored source notice; it
+does not assert that the source's symbols are retained in a particular executable.
+
+The excerpt is copied verbatim, including source comment markers:
+
+```go
+// Copyright (c) 2017 Takatoshi Nakagawa
+// Copyright (c) 2019 The age Authors
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+// THE SOFTWARE.
+```
+
+## Go runtime toolchain license and source identity
+
+This explicit hash-checked supplement is separate from the Go module archive and filename collector.
+Upstream Go source pin: `go1.27.3` (`go tool dist version`; upstream source tag).
+Toolchain identity: `go version go1.27.3-X:nodwarf5 linux/amd64`.
+Toolchain executable SHA-256: `21401c8d2dae2e6db0d756f7b9ae5a885ac6c14882cbbe521c6f49b184da8402`.
+GOROOT/VERSION SHA-256: `49b1651ee92b70282766993b556905e9464050a811572e047a74f95534ee9ce6`.
+The toolchain identity above includes the local `X:nodwarf5` build suffix; the upstream source pin
+does not claim that this distribution-specific executable was rebuilt byte-for-byte from the tag.
+
+Canonical Go toolchain runtime license source observed: `/usr/share/licenses/go/LICENSE`; LICENSES/supplemental/go-toolchain-LICENSE.txt — SHA-256 `911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad`; source: <https://go.googlesource.com/go/+/refs/tags/go1.27.3/LICENSE>.
+The complete canonical distribution license follows:
+
+```text
+Copyright 2009 The Go Authors.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+This records the canonical toolchain license, not every Go standard-library inline header or
+a symbol-retention analysis of a final product executable. Recheck the exact shipped binary's
+source/runtime notice closure before release. This is not a legal approval.
 
 ## System-provided runtime packages
 
