@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +23,20 @@ func budgetFixtureChat(t *testing.T, a *App, id string) {
 
 func budgetFixtureMessages(t *testing.T, a *App, chat string, count int, body string, withAttachments bool) []string {
 	t.Helper()
+	var cacheHash string
+	var cacheSize int64
+	if withAttachments {
+		data := []byte("verified budget media")
+		cacheHash = sha256Hex(data)
+		cacheSize = int64(len(data))
+		mediaRoot := filepath.Join(a.dir, "media")
+		if err := os.MkdirAll(mediaRoot, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(mediaRoot, cacheHash+".gif"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	ids := make([]string, count)
 	for i := range ids {
 		ids[i] = fmt.Sprintf("budget-%03d", i)
@@ -30,11 +46,12 @@ func budgetFixtureMessages(t *testing.T, a *App, chat string, count int, body st
 		if withAttachments {
 			meta, err := json.Marshal(Attachment{
 				Name:   strings.Repeat("a", 176) + `\"` + "日本語",
-				Size:   1,
+				Size:   cacheSize,
 				MIME:   "image/gif",
 				Kind:   "gif",
-				URL:    "file:///valid/日本語/" + strings.Repeat("深", 70) + "/fixture.gif",
-				SHA256: strings.Repeat("a", 64),
+				URL:    (&url.URL{Scheme: "file", Path: "/media/v1/" + cacheHash + ".gif"}).String(),
+				SHA256: cacheHash,
+				State:  "ready",
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -64,7 +81,7 @@ func errorCode(err error) string {
 }
 
 func TestHydratedListBudgetPagesMetadataAndCursor(t *testing.T) {
-	a, err := Open(filepath.Join(t.TempDir(), "profile"), true)
+	a, err := Open(filepath.Join(t.TempDir(), strings.Repeat("深", 70)+"日本語", "profile"), true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,8 +120,12 @@ func TestHydratedListBudgetPagesMetadataAndCursor(t *testing.T) {
 				t.Fatalf("duplicate row %s on page %d rows=%v before=%v", row.ID, pageNumber, rows, before)
 			}
 			seen[row.ID] = true
-			if row.Attachment == nil || !strings.Contains(row.Attachment.Name, "日本語") || !strings.Contains(row.Attachment.URL, "日本語") {
+			if row.Attachment == nil || !strings.Contains(row.Attachment.Name, "日本語") {
 				t.Fatalf("metadata was not hydrated: %#v", row)
+			}
+			parsedURL, parseErr := url.Parse(row.Attachment.URL)
+			if parseErr != nil || !strings.Contains(parsedURL.Path, "日本語") {
+				t.Fatalf("profile-local URL was not safely projected: %#v", row.Attachment)
 			}
 			if i > 0 {
 				previous := rows[i-1]

@@ -23,6 +23,7 @@
 #include <QUrl>
 #include <functional>
 #include <memory>
+#include <unistd.h>
 
 namespace {
 constexpr qint64 MaxFrame = 256 * 1024;
@@ -129,14 +130,47 @@ public:
       m_error = QStringLiteral("cannot create private fixture directory");
       return false;
     }
-    QFile::setPermissions(m_temp->path(), QFileDevice::ReadOwner |
-                                               QFileDevice::WriteOwner |
-                                               QFileDevice::ExeOwner);
+    const auto privateDirectoryPermissions = QFileDevice::ReadOwner |
+                                             QFileDevice::WriteOwner |
+                                             QFileDevice::ExeOwner;
+    if (!QFile::setPermissions(m_temp->path(), privateDirectoryPermissions)) {
+      m_error = QStringLiteral("cannot restrict private fixture directory");
+      return false;
+    }
+    m_profilePath = QDir(m_temp->path()).filePath(QStringLiteral("profile"));
+    const QString mediaDirectory =
+        QDir(m_profilePath).filePath(QStringLiteral("media"));
+    if (!QDir().mkpath(mediaDirectory) ||
+        !QFile::setPermissions(m_profilePath, privateDirectoryPermissions) ||
+        !QFile::setPermissions(mediaDirectory, privateDirectoryPermissions)) {
+      m_error = QStringLiteral("cannot create private profile media cache");
+      return false;
+    }
+    const QFileInfo tempInfo(m_temp->path());
+    const QFileInfo profileInfo(m_profilePath);
+    const QFileInfo mediaDirectoryInfo(mediaDirectory);
+    const auto sharedDirectoryPermissions =
+        QFileDevice::ReadGroup | QFileDevice::WriteGroup |
+        QFileDevice::ExeGroup | QFileDevice::ReadOther |
+        QFileDevice::WriteOther | QFileDevice::ExeOther;
+    if (tempInfo.isSymLink() || !tempInfo.isDir() ||
+        profileInfo.isSymLink() || !profileInfo.isDir() ||
+        mediaDirectoryInfo.isSymLink() || !mediaDirectoryInfo.isDir() ||
+        tempInfo.ownerId() != static_cast<uint>(::geteuid()) ||
+        profileInfo.ownerId() != tempInfo.ownerId() ||
+        mediaDirectoryInfo.ownerId() != tempInfo.ownerId() ||
+        (tempInfo.permissions() & sharedDirectoryPermissions) ||
+        (profileInfo.permissions() & sharedDirectoryPermissions) ||
+        (mediaDirectoryInfo.permissions() & sharedDirectoryPermissions)) {
+      m_error = QStringLiteral("private profile media cache permissions are unsafe");
+      return false;
+    }
     m_socketPath = m_temp->path() + QStringLiteral("/rpc.sock");
-    m_mediaPath = m_temp->path() + (isVideo() ? QStringLiteral("/synthetic-video.mp4")
-                                               : isSticker() ? QStringLiteral("/synthetic-sticker.webp")
-                                               : isImage() ? QStringLiteral("/synthetic-image.png")
-                                                           : QStringLiteral("/synthetic-document.pdf"));
+    m_mediaPath = QDir(mediaDirectory).filePath(
+        isVideo() ? QStringLiteral("synthetic-video.mp4")
+        : isSticker() ? QStringLiteral("synthetic-sticker.webp")
+        : isImage() ? QStringLiteral("synthetic-image.png")
+                    : QStringLiteral("synthetic-document.pdf"));
     QFile media(m_mediaPath);
     if (isVideo()) {
       const QString fixturePath = qEnvironmentVariable("WHATSFEATHER_MEDIA_TEST_FIXTURE");
@@ -311,6 +345,7 @@ public:
   }
 
   QString socketPath() const { return m_socketPath; }
+  QString profilePath() const { return m_profilePath; }
   QString mediaPath() const { return m_mediaPath; }
   QString error() const { return m_error; }
   bool isVideo() const { return m_kind == QStringLiteral("video"); }
@@ -448,22 +483,21 @@ private:
 
   QString m_kind;
   std::shared_ptr<QTemporaryDir> m_temp;
-  QString m_socketPath, m_mediaPath, m_error;
+  QString m_socketPath, m_profilePath, m_mediaPath, m_error;
   QLocalServer m_server;
   QHash<QLocalSocket *, QByteArray> m_input;
   QJsonArray m_downloadParams;
 };
 } // namespace
 
-QObject *startMediaDownloadFixture(QGuiApplication &, Controller &controller,
-                                   const QString &dataDir) {
+QObject *startMediaDownloadFixture(QGuiApplication &, Controller &controller) {
   auto *fixture = new SyntheticMediaRPC(QCoreApplication::instance());
   if (!fixture->start()) {
     qCritical() << "Cannot start private media test fixture:" << fixture->error();
     delete fixture;
     return nullptr;
   }
-  controller.start(fixture->socketPath(), dataDir, false);
+  controller.start(fixture->socketPath(), fixture->profilePath(), false);
   return fixture;
 }
 

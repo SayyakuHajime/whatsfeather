@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -413,7 +414,7 @@ func orientImage(src image.Image, orientation int) image.Image {
 	return dst
 }
 func sha256Hex(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
-func fileURL(p string) string   { return "file://" + p }
+func fileURL(p string) string   { return (&url.URL{Scheme: "file", Path: p}).String() }
 func isLocalPreparedPath(root, p string) bool {
 	cleanRoot, err := filepath.Abs(filepath.Join(root, "media", "prepared"))
 	if err != nil {

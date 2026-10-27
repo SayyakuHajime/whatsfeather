@@ -174,8 +174,8 @@ func TestMediaLibraryFinalBudgetAndPersistence(t *testing.T) {
 				t.Fatal("duplicate")
 			}
 			seen[m.ID] = true
-			if m.Attachment.URL != "file:///synthetic/fixture.png" {
-				t.Fatal("ready URL missing")
+			if m.Attachment.URL != "" || m.Attachment.State != "remote" {
+				t.Fatal("unowned ready URL was exposed as profile-local media")
 			}
 		}
 		if !r["has_more"].(bool) {

@@ -4,14 +4,18 @@
 #include <QDir>
 #include <QGuiApplication>
 #include <QFileInfo>
+#include <QFileDevice>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLocale>
+#include <QMetaType>
 #include <QRegularExpression>
 #include <QSet>
+#include <QUrl>
 #include <QUuid>
 #include <algorithm>
 #include <cmath>
+#include <unistd.h>
 
 namespace {
 bool safeContactDisplayText(const QString &value, int maxRunes,
@@ -69,6 +73,29 @@ bool privateRegularFile(const QString &root, const QString &path) {
   const auto canonicalPath = info.canonicalFilePath();
   return !canonicalRoot.isEmpty() && !canonicalPath.isEmpty() &&
          pathWithinDirectory(canonicalRoot, canonicalPath);
+}
+
+bool privateOwnedDirectory(const QString &path) {
+  const QFileInfo info(path);
+  constexpr auto sharedPermissions = QFileDevice::ReadGroup | QFileDevice::WriteGroup |
+                                    QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                    QFileDevice::WriteOther | QFileDevice::ExeOther;
+  return info.exists() && info.isDir() && !info.isSymLink() &&
+         info.ownerId() == static_cast<uint>(::geteuid()) &&
+         !(info.permissions() & sharedPermissions);
+}
+
+bool privatePreparedMediaFile(const QString &profileRoot, const QString &path) {
+  const auto mediaRoot = QDir(profileRoot).filePath(QStringLiteral("media"));
+  const auto preparedRoot = QDir(mediaRoot).filePath(QStringLiteral("prepared"));
+  const QFileInfo file(path);
+  constexpr auto sharedPermissions = QFileDevice::ReadGroup | QFileDevice::WriteGroup |
+                                    QFileDevice::ExeGroup | QFileDevice::ReadOther |
+                                    QFileDevice::WriteOther | QFileDevice::ExeOther;
+  return privateOwnedDirectory(mediaRoot) && privateOwnedDirectory(preparedRoot) &&
+         privateRegularFile(preparedRoot, path) &&
+         file.ownerId() == static_cast<uint>(::geteuid()) &&
+         !(file.permissions() & sharedPermissions);
 }
 
 bool validAlbumItem(const QJsonObject &item, const QString &profileRoot,
@@ -543,7 +570,8 @@ bool Controller::updateChat(const QString &chatId, const QVariantMap &changes) {
   return true;
 }
 bool Controller::refreshCommunities() {
-  if (m_demo || m_connectionState != "connected" || m_communitiesRefreshing ||
+  if (m_demo || (m_liveMode && !m_profileViewReady) ||
+      m_connectionState != "connected" || m_communitiesRefreshing ||
       !hasCapability("community.refresh"))
     return false;
   m_communitiesRefreshing = true;
@@ -612,7 +640,7 @@ bool Controller::loadHub(const QString &method, const QVariantMap &params) {
     if (!error.isEmpty()) {
       m_routeError = error.value("message").toString();
     } else {
-      m_routeData = value.toObject().toVariantMap();
+      m_routeData = sanitizeProfileMediaUrls(value.toObject().toVariantMap()).toMap();
       if (method == "contact.list")
         m_contacts.replace(value.toObject().value("contacts").toArray().toVariantList());
     }
@@ -648,7 +676,7 @@ bool Controller::performCapabilityAction(const QString &method,
           error.value("code").toString() == "disconnected")
         m_routeError = "Outcome is unknown. Review service state before retrying.";
     } else {
-      m_routeData = value.toObject().toVariantMap();
+      m_routeData = sanitizeProfileMediaUrls(value.toObject().toVariantMap()).toMap();
       if (method == QStringLiteral("group.create") ||
           method == QStringLiteral("group.update")) {
         const auto chat = value.toObject().value(QStringLiteral("chat")).toObject().toVariantMap();
@@ -714,6 +742,12 @@ void Controller::findMessages(const QString &query) {
 }
 void Controller::runFind() {
   auto query = m_findQuery;
+  if (m_liveMode && !m_profileViewReady) {
+    m_searching = false;
+    m_searchResults.replace({});
+    emit findChanged();
+    return;
+  }
   int gen = m_generation;
   request("message.search", {{"chat_id", m_id}, {"query", query}},
           [this, query, gen](QJsonValue value, QJsonObject error) {
@@ -721,8 +755,8 @@ void Controller::runFind() {
               return;
             m_searching = false;
             if (error.isEmpty())
-              m_searchResults.replace(
-                  value.toObject().value("messages").toArray().toVariantList());
+              m_searchResults.replace(sanitizeProfileMediaUrls(
+                  value.toObject().value("messages").toArray().toVariantList()).toList());
             else {
               m_error = error.value("message").toString();
               emit stateChanged();
@@ -742,7 +776,8 @@ bool Controller::revealMediaLibraryMessage(const QString &chatId,
   };
   // The sidebar may be search-filtered or paginated. A cached library target
   // need not be present there; message.list/context validate its exact identity.
-  if (!connected() || !hasCapability(QStringLiteral("media.library")) ||
+  if ((m_liveMode && !m_profileViewReady) || !connected() ||
+      !hasCapability(QStringLiteral("media.library")) ||
       !validToken(chatId) || !validToken(messageId)) {
     m_error = QStringLiteral("This cached media item cannot be opened in the selected conversation.");
     emit stateChanged();
@@ -765,7 +800,7 @@ bool Controller::revealMediaLibraryMessage(const QString &chatId,
   return true;
 }
 void Controller::revealMessage(const QString &id) {
-  if (m_id.isEmpty())
+  if (m_id.isEmpty() || (m_liveMode && !m_profileViewReady))
     return;
   int gen = m_generation;
   m_loading = true;
@@ -777,7 +812,8 @@ void Controller::revealMessage(const QString &id) {
             m_loading = false;
             if (error.isEmpty()) {
               auto o = value.toObject();
-              const auto rows = o.value("messages").toArray().toVariantList();
+              const auto rows = sanitizeProfileMediaUrls(
+                  o.value("messages").toArray().toVariantList()).toList();
               const bool exactTarget = std::any_of(rows.cbegin(), rows.cend(),
                   [this, &id](const QVariant &item) {
                     const auto row = item.toMap();
@@ -804,6 +840,10 @@ void Controller::revealMessage(const QString &id) {
           });
 }
 void Controller::stageAttachment(const QUrl &file) {
+  if (m_liveMode) {
+    stageAttachmentAs(file, QStringLiteral("photo"));
+    return;
+  }
   if (m_id.isEmpty() || !file.isLocalFile()) { m_error = "Select a conversation and a local file"; emit stateChanged(); return; }
   int gen=m_generation, serial=++m_attachmentSerial; auto path=file.toLocalFile();
   request("attachment.inspect", {{"path", path}}, [this,path,gen,serial](QJsonValue value,QJsonObject error) {
@@ -959,6 +999,11 @@ void Controller::stageAttachmentAsWithDisplayName(const QUrl &file,
     emit stateChanged();
     return;
   }
+  if (m_liveMode && !m_profileViewReady) {
+    m_error = QStringLiteral("The encrypted profile view must be verified before preparing media.");
+    emit stateChanged();
+    return;
+  }
   int gen = m_generation, serial = ++m_attachmentSerial;
   auto path = file.toLocalFile();
   m_attachmentOriginalPath = path;
@@ -976,12 +1021,36 @@ void Controller::stageAttachmentAsWithDisplayName(const QUrl &file,
               finishVoiceStaging(serial);
               return;
             }
+            if (m_liveMode && !error.isEmpty()) {
+              m_attachment["state"] = "error";
+              m_attachment["error"] =
+                  QStringLiteral("The encrypted backend could not safely prepare this media.");
+              m_error = m_attachment["error"].toString();
+              finishVoiceStaging(serial);
+              emit attachmentChanged();
+              emit stateChanged();
+              return;
+            }
             if (!error.isEmpty() && error.value("code").toString() != "method_not_found") {
               m_attachment["state"] = "error"; m_attachment["error"] = error.value("message").toString();
               finishVoiceStaging(serial);
               emit attachmentChanged(); return;
             }
             const auto preparedMeta = value.toObject();
+            const auto preparedPath = preparedMeta.value("prepared_path").toString();
+            if (m_liveMode &&
+                (preparedMeta.isEmpty() ||
+                 !privatePreparedMediaFile(m_dataDir, preparedPath) ||
+                 !isActiveProfileMediaFile(preparedPath))) {
+              m_attachment["state"] = "error";
+              m_attachment["error"] =
+                  QStringLiteral("Live media preparation returned a file outside the verified encrypted profile.");
+              m_error = m_attachment["error"].toString();
+              finishVoiceStaging(serial);
+              emit attachmentChanged();
+              emit stateChanged();
+              return;
+            }
             const bool audioMode = m_attachmentMode == "audio" ||
                                    m_attachmentMode == "voice-note";
             if (audioMode) {
@@ -1367,6 +1436,14 @@ void Controller::sendAttachment() {
   }
   if (m_sending || m_id.isEmpty() || m_attachmentPath.isEmpty() || m_attachment.value("state").toString() != "ready")
     return;
+  if (m_liveMode && !isActiveProfileMediaFile(m_attachmentPath)) {
+    m_error = QStringLiteral("The staged file is no longer inside the verified encrypted profile.");
+    m_attachment[QStringLiteral("state")] = QStringLiteral("error");
+    m_attachment[QStringLiteral("error")] = m_error;
+    emit attachmentChanged();
+    emit stateChanged();
+    return;
+  }
   if (m_draft.toUcs4().size() > 16000) {
     m_error = "Caption exceeds 16000 characters";
     emit stateChanged();
@@ -1556,6 +1633,66 @@ void Controller::sendAlbum() {
     emit stateChanged();
   });
 }
+bool Controller::isActiveProfileMediaFile(const QString &path) const {
+  if (m_dataDir.isEmpty() || (m_liveMode && !m_profileViewReady))
+    return false;
+  const auto mediaRoot = QDir(m_dataDir).filePath(QStringLiteral("media"));
+  if (!privateRegularFile(mediaRoot, path))
+    return false;
+  const auto absolutePath = QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+  const auto relativePath = QDir(m_dataDir).relativeFilePath(absolutePath);
+  QString current = m_dataDir;
+  const auto parts = relativePath.split(QDir::separator(), Qt::SkipEmptyParts);
+  if (parts.size() < 2 || parts.first() != QStringLiteral("media"))
+    return false;
+  for (qsizetype i = 0; i < parts.size(); ++i) {
+    current = QDir(current).filePath(parts.at(i));
+    const QFileInfo component(current);
+    if (!component.exists() || component.isSymLink() ||
+        (i + 1 < parts.size() && !component.isDir()))
+      return false;
+  }
+  return QFileInfo(current).isFile();
+}
+
+QVariant Controller::sanitizeProfileMediaUrls(const QVariant &value) const {
+  std::function<QVariant(const QVariant &)> sanitize =
+      [this, &sanitize](const QVariant &input) -> QVariant {
+    if (input.metaType().id() == QMetaType::QVariantMap) {
+      auto map = input.toMap();
+      bool removedLocalMedia = false;
+      for (auto it = map.begin(); it != map.end();) {
+        const bool urlField = it.key() == QStringLiteral("url") ||
+                              it.key() == QStringLiteral("thumbnail_url") ||
+                              it.key() == QStringLiteral("preview_url");
+        const QUrl url(it.value().toString());
+        if (urlField && url.isLocalFile() &&
+            !isActiveProfileMediaFile(url.toLocalFile())) {
+          it = map.erase(it);
+          removedLocalMedia = true;
+          continue;
+        }
+        it.value() = sanitize(it.value());
+        ++it;
+      }
+      if (removedLocalMedia &&
+          map.value(QStringLiteral("state")).toString() == QStringLiteral("ready"))
+        map.insert(QStringLiteral("state"), QStringLiteral("remote"));
+      return map;
+    }
+    if (input.metaType().id() == QMetaType::QVariantList) {
+      QVariantList list;
+      const auto source = input.toList();
+      list.reserve(source.size());
+      for (const auto &item : source)
+        list.append(sanitize(item));
+      return list;
+    }
+    return input;
+  };
+  return sanitize(value);
+}
+
 void Controller::copyText(const QString &text) {
   if (auto *app = qobject_cast<QGuiApplication *>(QCoreApplication::instance());
       app && QGuiApplication::clipboard())

@@ -424,7 +424,10 @@ func (a *App) attach(ctx context.Context, raw json.RawMessage) (any, error) {
 		status = "queued"
 	}
 	m := Message{ID: p.ClientID, ChatID: p.ChatID, Body: p.Text, Timestamp: time.Now().UnixMilli(), Outgoing: true, Status: status, Kind: meta.Kind, Attachment: &meta}
-	encoded, _ := json.Marshal(meta)
+	encoded, encodeErr := marshalStoredAttachment(meta)
+	if encodeErr != nil {
+		return nil, encodeErr
+	}
 	tx, e := a.db.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, e
@@ -752,8 +755,16 @@ func (a *App) download(ctx context.Context, raw json.RawMessage) (any, error) {
 	}
 	meta.Size, meta.State, meta.Error = info.Size(), "ready", ""
 	meta.URL = (&url.URL{Scheme: "file", Path: destination}).String()
-	encoded, _ = json.Marshal(meta)
-	if _, persistErr := a.db.ExecContext(context.Background(), "UPDATE attachments SET meta=? WHERE chat_id=? AND message_id=?", string(encoded), p.ChatID, p.ID); persistErr != nil {
+	encoded, persistErr := marshalStoredAttachment(meta)
+	if persistErr != nil {
+		if destinationCreated {
+			if cleanupErr := os.Remove(destination); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
+				persistErr = fmt.Errorf("%w; media cleanup failed: %v", persistErr, cleanupErr)
+			}
+		}
+		return nil, markDownloadError(persistErr)
+	}
+	if _, persistErr = a.db.ExecContext(context.Background(), "UPDATE attachments SET meta=? WHERE chat_id=? AND message_id=?", string(encoded), p.ChatID, p.ID); persistErr != nil {
 		if destinationCreated {
 			if cleanupErr := os.Remove(destination); cleanupErr != nil && !errors.Is(cleanupErr, os.ErrNotExist) {
 				persistErr = fmt.Errorf("%w; media cleanup failed: %v", persistErr, cleanupErr)
@@ -798,9 +809,70 @@ func mediaDestination(root, hash, mime, name string) string {
 	return filepath.Join(root, hash+ext)
 }
 
+func mediaCacheFilename(meta Attachment) (string, bool) {
+	if len(meta.SHA256) != sha256.Size*2 || strings.ToLower(meta.SHA256) != meta.SHA256 {
+		return "", false
+	}
+	decoded, err := hex.DecodeString(meta.SHA256)
+	if err != nil || len(decoded) != sha256.Size {
+		return "", false
+	}
+	name := filepath.Base(mediaDestination("", meta.SHA256, meta.MIME, meta.Name))
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") {
+		return "", false
+	}
+	return name, true
+}
+
+func mediaCacheIdentityURL(meta Attachment) (string, bool) {
+	name, ok := mediaCacheFilename(meta)
+	if !ok {
+		return "", false
+	}
+	return (&url.URL{Scheme: "file", Path: "/media/v1/" + name}).String(), true
+}
+
+func mediaIdentityHash(value string, meta Attachment) (string, bool) {
+	if !isLocalFileURL(value) {
+		return "", false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || !strings.HasPrefix(parsed.Path, "/media/v1/") {
+		return "", false
+	}
+	name := strings.TrimPrefix(parsed.Path, "/media/v1/")
+	if name == "" || filepath.Base(name) != name || len(name) < sha256.Size*2 {
+		return "", false
+	}
+	hash := name[:sha256.Size*2]
+	if len(hash) != sha256.Size*2 || strings.ToLower(hash) != hash {
+		return "", false
+	}
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != sha256.Size || (meta.SHA256 != "" && meta.SHA256 != hash) {
+		return "", false
+	}
+	meta.SHA256 = hash
+	expected, ok := mediaCacheFilename(meta)
+	return hash, ok && name == expected
+}
+
+func marshalStoredAttachment(meta Attachment) ([]byte, error) {
+	if meta.State == "ready" && isLocalFileURL(meta.URL) {
+		identity, ok := mediaCacheIdentityURL(meta)
+		if !ok {
+			return nil, fail("invalid_attachment", "Local media metadata has no valid cache identity")
+		}
+		meta.URL = identity
+	}
+	return json.Marshal(meta)
+}
+
 func isLocalFileURL(value string) bool {
 	u, e := url.Parse(value)
-	return e == nil && u.Scheme == "file" && u.Host == "" && u.Path != ""
+	return e == nil && u.Scheme == "file" && u.Opaque == "" && u.User == nil && u.Host == "" &&
+		u.RawQuery == "" && !u.ForceQuery && u.Fragment == "" && u.Path != "" && filepath.IsAbs(u.Path) &&
+		filepath.Clean(u.Path) == u.Path && u.String() == value
 }
 
 func (a *App) queryMessages(ctx context.Context, query string, args ...any) ([]Message, error) {
@@ -853,18 +925,31 @@ func (a *App) fillAttachments(ctx context.Context, chat string, messages []Messa
 		if e = json.Unmarshal([]byte(raw), &meta); e != nil {
 			return fmt.Errorf("invalid media metadata")
 		}
-		if meta.URL != "" && !isLocalFileURL(meta.URL) {
-			meta.URL = ""
-			if meta.State == "ready" {
-				meta.State = "remote"
-			}
-		}
 		if meta.State == "" {
 			if meta.URL != "" {
 				meta.State = "ready"
 			} else {
 				meta.State = "remote"
 			}
+		}
+		if meta.SHA256 == "" {
+			if hash, ok := mediaIdentityHash(meta.URL, meta); ok {
+				meta.SHA256 = hash
+			}
+		}
+		if meta.State == "ready" {
+			projected, ok, verifyErr := resolveOwnedMediaURL(ctx, a.dir, meta)
+			if verifyErr != nil {
+				return verifyErr
+			}
+			if ok {
+				meta.URL = projected
+			} else {
+				meta.URL = ""
+				meta.State = "remote"
+			}
+		} else {
+			meta.URL = ""
 		}
 		byID[id] = meta
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -31,12 +32,68 @@ type albumSource struct {
 	data []byte
 }
 
-func albumSourceTokens(paths []string) []string {
-	tokens := make([]string, len(paths))
+func albumSourceTokens(paths []string, prepared map[string]Attachment) []string {
+	tokens := make([]string, len(paths)*2)
 	for i, path := range paths {
-		tokens[i] = sha256Hex([]byte(filepath.Clean(path)))
+		tokens[i*2] = sha256Hex([]byte(filepath.Clean(path)))
+		if meta, ok := prepared[path]; ok && meta.PreparedPath == path && meta.Kind == "image" && meta.Mode == "photo" && meta.PreparedSize > 0 && meta.SHA256 != "" {
+			// The reviewed prepared snapshot is stable across profile relocation;
+			// the separately stored path token keeps exact legacy retries idempotent.
+			meta.URL, meta.PreparedPath = "", ""
+			if encoded, err := json.Marshal(meta); err == nil {
+				tokens[i*2+1] = sha256Hex(encoded)
+			}
+		}
 	}
 	return tokens
+}
+
+func (a *App) preparedAlbumItemMatches(ctx context.Context, path string, expected Attachment) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if !isLocalPreparedPath(a.dir, path) || expected.Size <= 0 || expected.Size > attachmentLimit {
+		return false, nil
+	}
+	if _, ok := mediaCacheFilename(expected); !ok {
+		return false, nil
+	}
+	mediaRoot := filepath.Join(a.dir, "media")
+	mediaInfo, err := os.Lstat(mediaRoot)
+	if err != nil || mediaInfo.Mode()&os.ModeSymlink != 0 || !mediaInfo.IsDir() {
+		return false, nil
+	}
+	preparedRoot := filepath.Join(mediaRoot, "prepared")
+	preparedInfo, err := os.Lstat(preparedRoot)
+	if err != nil || preparedInfo.Mode()&os.ModeSymlink != 0 || !preparedInfo.IsDir() {
+		return false, nil
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || pathInfo.Size() != expected.Size {
+		return false, nil
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return false, nil
+	}
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !sameMediaSnapshot(pathInfo, opened) {
+		_ = file.Close()
+		return false, nil
+	}
+	digest, size, hashErr := hashMediaFile(ctx, file, opened.Size(), nil)
+	current, currentErr := file.Stat()
+	pathAfter, pathErr := os.Lstat(path)
+	stable := currentErr == nil && pathErr == nil && pathAfter.Mode()&os.ModeSymlink == 0 &&
+		sameMediaSnapshot(opened, current) && sameMediaSnapshot(opened, pathAfter)
+	closeErr := file.Close()
+	if err = ctx.Err(); err != nil {
+		return false, err
+	}
+	if hashErr != nil || !stable || closeErr != nil || size != expected.Size {
+		return false, nil
+	}
+	return digest == expected.SHA256, nil
 }
 
 func (a *App) prepareAlbum(ctx context.Context, raw []byte) (any, error) {
@@ -182,7 +239,9 @@ func (a *App) sendAlbum(ctx context.Context, raw []byte) (any, error) {
 		}
 		seen[clean] = struct{}{}
 	}
-	sourceTokens := albumSourceTokens(p.PreparedPaths)
+	a.mediaMu.Lock()
+	sourceTokens := albumSourceTokens(p.PreparedPaths, a.prepared)
+	a.mediaMu.Unlock()
 	encodedTokens, err := json.Marshal(sourceTokens)
 	if err != nil {
 		return nil, err
@@ -213,12 +272,39 @@ func (a *App) sendAlbum(ctx context.Context, raw []byte) (any, error) {
 			return nil, err
 		}
 		var storedTokens []string
-		if err = json.Unmarshal([]byte(storedTokensJSON), &storedTokens); err != nil || len(storedTokens) != len(sourceTokens) {
+		if err = json.Unmarshal([]byte(storedTokensJSON), &storedTokens); err != nil || (len(storedTokens) != len(p.PreparedPaths) && len(storedTokens) != len(sourceTokens)) {
 			return nil, fail("conflict", "Client ID belongs to an incomplete album")
 		}
-		for i := range sourceTokens {
-			if sourceTokens[i] != storedTokens[i] {
-				return nil, fail("conflict", "Client ID already belongs to a different album request")
+		var retryVerificationBytes int64
+		for i := range p.PreparedPaths {
+			pathToken := sourceTokens[i*2]
+			if len(storedTokens) == len(p.PreparedPaths) {
+				// Legacy path tokens identify the original staged path but never
+				// prove byte identity by themselves.
+				if pathToken != storedTokens[i] {
+					return nil, fail("conflict", "Client ID already belongs to a different album request")
+				}
+			} else {
+				snapshotToken := sourceTokens[i*2+1]
+				if snapshotToken != "" {
+					if snapshotToken != storedTokens[i*2+1] {
+						return nil, fail("conflict", "Client ID already belongs to a different album request")
+					}
+				} else if pathToken != storedTokens[i*2] {
+					return nil, fail("conflict", "Client ID already belongs to a different album request")
+				}
+			}
+			expected := (*existing[0].Album)[i]
+			if expected.Size <= 0 || expected.Size > maxAlbumPrepared-retryVerificationBytes {
+				return nil, fail("media_verification_budget", "Album retry verification exceeds the 50 MiB per-request limit")
+			}
+			retryVerificationBytes += expected.Size
+			matches, verifyErr := a.preparedAlbumItemMatches(ctx, p.PreparedPaths[i], expected)
+			if verifyErr != nil {
+				return nil, verifyErr
+			}
+			if !matches {
+				return nil, fail("conflict", "Client ID belongs to an album whose original source bytes cannot be verified")
 			}
 		}
 		return map[string]any{"message": existing[0]}, nil
@@ -293,7 +379,15 @@ func (a *App) sendAlbum(ctx context.Context, raw []byte) (any, error) {
 	a.mediaMu.Unlock()
 	mediaLocked = false
 
-	encodedItems, err := json.Marshal(items)
+	storedItems := append([]Attachment(nil), items...)
+	for i := range storedItems {
+		identity, ok := mediaCacheIdentityURL(storedItems[i])
+		if !ok {
+			return nil, fail("invalid_attachment", "Album item has no valid cache identity")
+		}
+		storedItems[i].URL = identity
+	}
+	encodedItems, err := json.Marshal(storedItems)
 	if err != nil {
 		return nil, err
 	}
@@ -398,11 +492,14 @@ func (a *App) fillAlbums(ctx context.Context, chat string, messages []Message) e
 			if item.Kind != "image" || item.Mode != "photo" || item.PreparedPath != "" || item.State != "ready" || !strings.HasPrefix(item.MIME, "image/") || item.MIME == "image/gif" {
 				return fmt.Errorf("invalid album metadata")
 			}
-			if item.URL != "" && !isLocalFileURL(item.URL) {
-				item.URL = ""
-				item.State = "remote"
+			projected, ok, verifyErr := resolveOwnedMediaURL(ctx, a.dir, *item)
+			if verifyErr != nil {
+				return verifyErr
 			}
-			if item.URL == "" {
+			if ok {
+				item.URL = projected
+			} else {
+				item.URL = ""
 				item.State = "remote"
 			}
 		}

@@ -39,9 +39,13 @@ public:
             buffer.remove(0, newline + 1);
             QJsonParseError error;
             const auto document = QJsonDocument::fromJson(line, &error);
-            if (error.error == QJsonParseError::NoError &&
-                document.isObject() && onRequest)
-              onRequest(socket, document.object());
+            if (error.error == QJsonParseError::NoError && document.isObject()) {
+              const auto request = document.object();
+              m_requestMethods.insert(request.value("id").toString(),
+                                      request.value("method").toString());
+              if (onRequest)
+                onRequest(socket, request);
+            }
           }
         });
         connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
@@ -72,7 +76,24 @@ public:
   void send(QLocalSocket *socket, const QByteArray &bytes) {
     if (!socket || socket->state() != QLocalSocket::ConnectedState)
       return;
-    socket->write(bytes);
+    auto outgoing = bytes;
+    if (!storageView.isEmpty()) {
+      QJsonParseError parseError;
+      const auto document = QJsonDocument::fromJson(outgoing, &parseError);
+      if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+        auto frame = document.object();
+        const auto id = frame.value("id").toString();
+        if (m_requestMethods.value(id) == QStringLiteral("app.status")) {
+          auto result = frame.value("result").toObject();
+          result.insert(QStringLiteral("mode"), QStringLiteral("live"));
+          result.insert(QStringLiteral("storage_view"), storageView);
+          frame.insert(QStringLiteral("result"), result);
+          outgoing = QJsonDocument(frame).toJson(QJsonDocument::Compact) + '\n';
+        }
+        m_requestMethods.remove(id);
+      }
+    }
+    socket->write(outgoing);
     socket->flush();
   }
 
@@ -96,12 +117,85 @@ public:
 
   std::function<void(QLocalSocket *, const QJsonObject &)> onRequest;
   int connectionCount = 0;
+  QJsonObject storageView;
+
+  void setEncryptedStorageView(const QJsonObject &view) { storageView = view; }
 
 private:
   QString m_path;
   QLocalServer m_server;
   QList<QLocalSocket *> m_sockets;
   QHash<QLocalSocket *, QByteArray> m_input;
+  QHash<QString, QString> m_requestMethods;
+};
+
+struct SyntheticEncryptedProfile {
+  explicit SyntheticEncryptedProfile(const QString &basePath) {
+    runtimeDir = QDir(basePath).filePath(QStringLiteral("runtime"));
+    ciphertextRoot = QDir(basePath).filePath(QStringLiteral("ciphertext"));
+    profileRoot = QDir(runtimeDir).filePath(QStringLiteral("wf-pv-synthetic"));
+    for (const auto &path : {runtimeDir, ciphertextRoot, profileRoot}) {
+      if (!QDir().mkpath(path) ||
+          !QFile::setPermissions(path, QFileDevice::ReadOwner |
+                                           QFileDevice::WriteOwner |
+                                           QFileDevice::ExeOwner))
+        return;
+    }
+    valid = true;
+  }
+
+  QString socketPath(const QString &name) const {
+    return QDir(runtimeDir).filePath(name);
+  }
+
+  QString createPreparedFile(const QString &name,
+                             const QByteArray &contents = QByteArrayLiteral("synthetic prepared media")) const {
+    const auto mediaDir = QDir(profileRoot).filePath(QStringLiteral("media"));
+    const auto preparedDir = QDir(mediaDir).filePath(QStringLiteral("prepared"));
+    for (const auto &directory : {mediaDir, preparedDir})
+      if (!QDir().mkpath(directory) ||
+          !QFile::setPermissions(directory, QFileDevice::ReadOwner |
+                                               QFileDevice::WriteOwner |
+                                               QFileDevice::ExeOwner))
+        return {};
+    const auto path = QDir(preparedDir).filePath(name);
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) ||
+        file.write(contents) != contents.size())
+      return {};
+    file.close();
+    if (!QFile::setPermissions(path, QFileDevice::ReadOwner |
+                                         QFileDevice::WriteOwner))
+      return {};
+    return path;
+  }
+
+  QJsonObject statusView() const {
+    return {{QStringLiteral("version"), 1},
+            {QStringLiteral("mode"), QStringLiteral("encrypted")},
+            {QStringLiteral("ciphertext_root"), ciphertextRoot},
+            {QStringLiteral("runtime_dir"), runtimeDir},
+            {QStringLiteral("profile_root"), profileRoot},
+            {QStringLiteral("view_id"), QStringLiteral("0123456789abcdef0123456789abcdef")},
+            {QStringLiteral("mount_id"), QStringLiteral("42")}};
+  }
+
+  Controller::ProfileMountVerifier mountVerifier() const {
+    return [](const QString &, const QString &runtime, const QString &profile,
+              const QString &mountId, QString *error) {
+      if (mountId == QStringLiteral("42") &&
+          QFileInfo(profile).absolutePath() == runtime)
+        return true;
+      if (error)
+        *error = QStringLiteral("Synthetic fixture mount identity mismatch.");
+      return false;
+    };
+  }
+
+  bool valid = false;
+  QString runtimeDir;
+  QString ciphertextRoot;
+  QString profileRoot;
 };
 
 QByteArray responseFrame(const QString &id, QJsonObject result,
@@ -507,7 +601,11 @@ private slots:
   }
   void liveAttachmentStagingAndUncertainSendPreserveDraft() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/live-media.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("live-media.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     QString sentState = "unknown";
     QStringList clientIds;
     QJsonObject historyRequestParams;
@@ -527,6 +625,12 @@ private slots:
         result = {{"chat_id", "fixture:self"}, {"requested", true}, {"completed", false}, {"count", 50}, {"anchor_id", "anchor"}, {"anchor_timestamp", 10}};
       }
       else if (method == "attachment.inspect") result = {{"name", "fixture.png"}, {"kind", "image"}, {"mime", "image/png"}, {"size", 10}};
+      else if (method == "attachment.prepare") {
+        const auto prepared = profile.createPreparedFile(QStringLiteral("live-media.webp"));
+        result = {{"name", "fixture.png"}, {"kind", "image"},
+                  {"mode", "photo"}, {"state", "ready"},
+                  {"prepared_path", prepared}};
+      }
       else if (method == "message.attach") {
         const auto params = request.value("params").toObject();
         clientIds.append(params.value("client_id").toString());
@@ -534,9 +638,9 @@ private slots:
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/live-media.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QVERIFY(QMetaObject::invokeMethod(&c, "openSelfChat"));
     QTRY_COMPARE(c.selectedId(), QStringLiteral("fixture:self"));
     QCOMPARE(c.selectedTitle(), QStringLiteral("Tester (You)"));
@@ -550,6 +654,8 @@ private slots:
     c.setDraft("Keep this caption until accepted");
     c.stageAttachment(QUrl::fromLocalFile(root.path() + "/fixture.png"));
     QTRY_VERIFY_WITH_TIMEOUT(!c.attachment().isEmpty(), 1500);
+    QTRY_COMPARE_WITH_TIMEOUT(c.attachment().value("state").toString(),
+                              QStringLiteral("ready"), 1500);
     c.send();
     QTRY_VERIFY(!c.sending());
     QCOMPARE(clientIds.size(), 1);
@@ -834,7 +940,15 @@ private slots:
 
   void preparationNeverSendsOldFileAndModesKeepOriginal() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/prepare.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("prepare.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
+    const auto preparedDocument = profile.createPreparedFile(QStringLiteral("prepared-document.png"));
+    const auto preparedPhoto = profile.createPreparedFile(QStringLiteral("prepared-photo.jpg"));
+    QVERIFY(!preparedDocument.isEmpty());
+    QVERIFY(!preparedPhoto.isEmpty());
     QPointer<QLocalSocket> pending;
     QString pendingId;
     QJsonObject lastPrepare, lastSend;
@@ -851,16 +965,16 @@ private slots:
       else if (method == "attachment.prepare") {
         lastPrepare = p;
         if (hold) { pending = socket; pendingId = id; return; }
-        result = {{"name", "new.png"}, {"kind", "document"}, {"mode", "document"}, {"prepared_path", root.path()+"/prepared-document.png"}, {"state", "ready"}};
+        result = {{"name", "new.png"}, {"kind", "document"}, {"mode", "document"}, {"prepared_path", preparedDocument}, {"state", "ready"}};
       } else if (method == "message.attach") {
         lastSend = p;
         result = {{"message", QJsonObject{{"id", p.value("client_id")}, {"chat_id", p.value("chat_id")}, {"status", "accepted"}}}};
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path()+"/prepare.sock", root.path()+"/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     c.selectChat("fixture:self"); QTRY_VERIFY(!c.loading());
     c.stageAttachment(QUrl::fromLocalFile(root.path()+"/old.png"));
     QTRY_VERIFY(!c.attachment().isEmpty());
@@ -869,7 +983,7 @@ private slots:
     QTRY_VERIFY(pending);
     c.send(); QTest::qWait(50);
     QVERIFY2(lastSend.isEmpty(), "preparation sent the previously staged file");
-    backend.send(pending, responseFrame(pendingId, {{"name", "new.jpg"}, {"kind", "image"}, {"state", "ready"}, {"mode", "photo"}, {"prepared_path", root.path()+"/prepared-photo.jpg"}}));
+    backend.send(pending, responseFrame(pendingId, {{"name", "new.jpg"}, {"kind", "image"}, {"state", "ready"}, {"mode", "photo"}, {"prepared_path", preparedPhoto}}));
     QTRY_COMPARE(c.attachment().value("state").toString(), QStringLiteral("ready"));
     hold = false;
     QVERIFY(QMetaObject::invokeMethod(&c, "changeAttachmentMode", Q_ARG(QString, QStringLiteral("document"))));
@@ -877,19 +991,25 @@ private slots:
     QCOMPARE(lastPrepare.value("path").toString(), original);
     QTRY_COMPARE(c.attachment().value("mode").toString(), QStringLiteral("document"));
     c.send(); QTRY_VERIFY(!lastSend.isEmpty());
-    QCOMPARE(lastSend.value("path").toString(), root.path()+"/prepared-document.png");
+    QCOMPARE(lastSend.value("path").toString(), preparedDocument);
     QCOMPARE(lastSend.value("mode").toString(), QStringLiteral("document"));
   }
   void explicitSyntheticRecordingStagesAndSendsTypedVoiceNote() {
     QTemporaryDir root;
     QVERIFY(root.isValid());
-    FakeBackend backend(root.path() + "/voice-note.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("voice-note.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     auto captureState = std::make_shared<SyntheticVoiceCaptureState>();
     int prepareCount = 0;
     int sendCount = 0;
     QJsonObject prepareParams, sendParams;
     bool privateInputAtPrepare = false;
-    const auto preparedPath = root.path() + "/backend-prepared.ogg";
+    const auto preparedPath = profile.createPreparedFile(
+        QStringLiteral("backend-prepared.ogg"));
+    QVERIFY(!preparedPath.isEmpty());
     backend.onRequest = [&](QLocalSocket *socket, const QJsonObject &request) {
       const auto id = request.value("id").toString();
       const auto method = request.value("method").toString();
@@ -939,9 +1059,8 @@ private slots:
     Controller controller(nullptr, [captureState] {
       ++captureState->factoryCalls;
       return std::make_unique<SyntheticVoiceCaptureSource>(captureState);
-    });
-    controller.start(root.path() + "/voice-note.sock",
-                     root.path() + "/profile", true);
+    }, profile.mountVerifier());
+    controller.start(socketPath, profile.ciphertextRoot, true);
     QTRY_VERIFY_WITH_TIMEOUT(controller.connected(), 3000);
     QVERIFY(!controller.startVoiceNoteRecording());
     QCOMPARE(captureState->factoryCalls, 0);
@@ -979,8 +1098,11 @@ private slots:
   void audioPreparationFailsClosedWhenValidatedStageIsUnavailable() {
     QTemporaryDir root;
     QVERIFY(root.isValid());
-    const auto socketPath = root.path() + "/audio-prepare.sock";
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("audio-prepare.sock"));
     FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     QFile source(root.path() + "/voice-note.ogg");
     QVERIFY(source.open(QIODevice::WriteOnly));
     QCOMPARE(source.write(QByteArrayLiteral("synthetic audio fixture")),
@@ -1026,8 +1148,8 @@ private slots:
       backend.send(socket, responseFrame(id, result));
     };
 
-    Controller controller;
-    controller.start(socketPath, root.path() + "/profile", true);
+    Controller controller(nullptr, {}, profile.mountVerifier());
+    controller.start(socketPath, profile.ciphertextRoot, true);
     QTRY_VERIFY_WITH_TIMEOUT(controller.connected(), 3000);
     controller.selectChat(QStringLiteral("fixture:self"));
     QTRY_VERIFY_WITH_TIMEOUT(!controller.loading(), 3000);
@@ -1262,7 +1384,11 @@ private slots:
   }
   void capabilityGatesProtocolMessageActions() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/capabilities.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("capabilities.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     bool receivedReaction = false;
     int reactionRequests = 0;
     QJsonObject reactionParams;
@@ -1291,9 +1417,9 @@ private slots:
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/capabilities.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     c.selectChat("fixture:one");
     QTRY_COMPARE(c.messageCount(), 1);
     QTRY_VERIFY(c.hasCapability("message.react"));
@@ -1453,7 +1579,11 @@ private slots:
   }
   void notificationSubscriptionIsOptInAndDiscardsStaleResponses() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/notify.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("notify.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     int polls = 0;
     QJsonObject lastParams;
     QLocalSocket *pending = nullptr;
@@ -1469,9 +1599,10 @@ private slots:
       }
       backend.send(socket, responseFrame(request.value("id").toString(), result));
     };
-    Controller c;
-    c.start(root.path() + "/notify.sock", root.path() + "/profile", false);
-    QTRY_VERIFY(c.connected() && c.hasCapability("notification.poll"));
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && c.encryptedProfileViewReady() &&
+                c.hasCapability("notification.poll"));
     QTest::qWait(1100);
     QCOMPARE(polls, 0);
     QVERIFY(QMetaObject::invokeMethod(&c, "setNotificationSubscription", Q_ARG(bool, true), Q_ARG(bool, false)));
@@ -1497,7 +1628,11 @@ private slots:
   }
   void notificationPollReachesOptInDesktopDelivery() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/notification-delivery.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("notification-delivery.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     int polls = 0;
     backend.onRequest = [&](QLocalSocket *socket, const QJsonObject &request) {
       const auto id = request.value("id").toString();
@@ -1552,7 +1687,7 @@ private slots:
     auto *delivery = new RecordingDelivery;
     DesktopNotifications desktopNotifications(
         &settings, std::unique_ptr<DesktopNotificationDelivery>(delivery));
-    Controller controller;
+    Controller controller(nullptr, {}, profile.mountVerifier());
     QObject::connect(
         &controller, &Controller::incomingNotification, &desktopNotifications,
         [&desktopNotifications, &controller](const QVariantMap &event) {
@@ -1568,9 +1703,8 @@ private slots:
                      &DesktopNotifications::preferencesChanged, &controller,
                      updateSubscription);
     updateSubscription();
-    controller.start(root.path() + "/notification-delivery.sock",
-                     root.path() + "/profile", false);
-    QTRY_VERIFY(controller.connected() &&
+    controller.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(controller.connected() && controller.encryptedProfileViewReady() &&
                 controller.hasCapability("notification.poll"));
     QTest::qWait(1100);
     QCOMPARE(polls, 0);
@@ -1714,7 +1848,11 @@ private slots:
   }
   void capabilityFeaturesGateRelatedMethods() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/feature-capabilities.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("feature-capabilities.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     backend.onRequest = [&](QLocalSocket *socket, const QJsonObject &request) {
       const auto id = request.value("id").toString();
       const auto method = request.value("method").toString();
@@ -1734,9 +1872,9 @@ private slots:
         result = {{"chats", QJsonArray{}}};
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/feature-capabilities.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     QVERIFY(!c.hasCapability("contact.list"));
     QVERIFY(!c.hasCapability("chat.open"));
@@ -1749,7 +1887,11 @@ private slots:
   }
   void accountAndPrivacyActionsRespectFeatureBoundaries() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/profile-privacy.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("profile-privacy.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     QStringList requestedMethods;
     backend.onRequest = [&](QLocalSocket *socket, const QJsonObject &request) {
       const auto id = request.value("id").toString();
@@ -1772,9 +1914,9 @@ private slots:
         result = {{"chats", QJsonArray{}}};
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/profile-privacy.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     QVERIFY(!c.hasCapability("account.update"));
     QVERIFY(!c.hasCapability("privacy.set"));
@@ -1786,8 +1928,11 @@ private slots:
   }
   void localDisconnectCapabilityAndActionStayRemoteUnlinkFree() {
     QTemporaryDir root;
-    const auto socketPath = root.path() + "/disconnect-scope.sock";
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("disconnect-scope.sock"));
     FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     bool localDisconnectAvailable = false;
     int localDisconnectCalls = 0;
     int remoteLogoutCalls = 0;
@@ -1815,17 +1960,17 @@ private slots:
       backend.send(socket, responseFrame(id, result));
     };
     {
-      Controller c;
-      c.start(socketPath, root.path() + "/profile-unavailable", false);
-      QTRY_VERIFY(c.connected() && !c.demo());
+      Controller c(nullptr, {}, profile.mountVerifier());
+      c.start(socketPath, profile.ciphertextRoot, true);
+      QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
       QTRY_VERIFY(c.capabilitiesReady());
       QVERIFY(!c.hasCapability("auth.disconnect"));
     }
     localDisconnectAvailable = true;
     {
-      Controller c;
-      c.start(socketPath, root.path() + "/profile-available", false);
-      QTRY_VERIFY(c.connected() && !c.demo());
+      Controller c(nullptr, {}, profile.mountVerifier());
+      c.start(socketPath, profile.ciphertextRoot, true);
+      QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
       QTRY_VERIFY(c.capabilitiesReady());
       QVERIFY(c.hasCapability("auth.disconnect"));
       c.disconnectLive();
@@ -1838,7 +1983,11 @@ private slots:
   }
   void contactRosterPagingStateClearsOnDisconnect() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/contact-roster.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("contact-roster.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     backend.onRequest = [&](QLocalSocket *socket, const QJsonObject &request) {
       const auto id = request.value("id").toString();
       const auto method = request.value("method").toString();
@@ -1856,9 +2005,9 @@ private slots:
                   {"has_more", true}, {"next_cursor", "fixture:contact"}};
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/contact-roster.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     c.searchContacts(QString());
     QTRY_VERIFY_WITH_TIMEOUT(c.contactsHasMore(), 2500);
@@ -1872,7 +2021,11 @@ private slots:
   }
   void unreadMarkUpdateUsesBooleanInputAndAuthoritativeProjection() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/chat-update.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("chat-update.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     QPointer<QLocalSocket> pendingSocket;
     QString pendingId;
     QJsonObject pendingParams;
@@ -1897,9 +2050,9 @@ private slots:
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/chat-update.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     QTRY_COMPARE(c.chats()->rowCount(), 1);
 
@@ -1932,7 +2085,11 @@ private slots:
   }
   void staleContactResultsAreDiscardedAfterQueryClears() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/contacts.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socketPath = profile.socketPath(QStringLiteral("contacts.sock"));
+    FakeBackend backend(socketPath);
+    backend.setEncryptedStorageView(profile.statusView());
     QPointer<QLocalSocket> heldSocket;
     QString heldId;
     QString requestedQuery;
@@ -1966,9 +2123,9 @@ private slots:
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/contacts.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socketPath, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     c.searchContacts("stale");
     QTRY_VERIFY_WITH_TIMEOUT(heldSocket, 2000);
@@ -1998,7 +2155,11 @@ private slots:
   }
   void protocolMessageActionsUseDeclaredParameters() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/message-actions.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("message-actions.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     QList<QJsonObject> actionRequests;
     const QJsonArray methods{
         "message.reply", "message.react", "message.edit", "message.delete",
@@ -2025,9 +2186,9 @@ private slots:
         actionRequests.append(request);
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/message-actions.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     QTRY_COMPARE(c.chats()->rowCount(), 2);
     c.selectChat("fixture:one");
@@ -2078,7 +2239,11 @@ private slots:
   }
   void listReplyUsesPrivateRowIndicesAndLocksTarget() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/list-reply.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("list-reply.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     QList<QJsonObject> actionRequests;
     const QJsonArray methods{"list.reply"};
     const QJsonObject listProjection{
@@ -2116,8 +2281,8 @@ private slots:
       }
       backend.send(socket, responseFrame(id, result));
     };
-    Controller controller;
-    controller.start(root.path() + "/list-reply.sock", root.path() + "/profile", true);
+    Controller controller(nullptr, {}, profile.mountVerifier());
+    controller.start(socket, profile.ciphertextRoot, true);
     QTRY_VERIFY(controller.connected() && !controller.demo());
     QTRY_VERIFY(controller.capabilitiesReady());
     QTRY_COMPARE(controller.chats()->rowCount(), 1);
@@ -2222,7 +2387,11 @@ private slots:
   }
   void buttonReplyIsRejectedOutsideDemoMode() {
     QTemporaryDir root;
-    FakeBackend backend(root.path() + "/button-reply-live.sock");
+    SyntheticEncryptedProfile profile(root.path());
+    QVERIFY(profile.valid);
+    const auto socket = profile.socketPath(QStringLiteral("button-reply-live.sock"));
+    FakeBackend backend(socket);
+    backend.setEncryptedStorageView(profile.statusView());
     int actionRequests = 0;
     const QJsonArray methods{"button.reply"};
     const QJsonObject buttonsProjection{
@@ -2248,9 +2417,9 @@ private slots:
         ++actionRequests;
       backend.send(socket, responseFrame(id, result));
     };
-    Controller c;
-    c.start(root.path() + "/button-reply-live.sock", root.path() + "/profile", true);
-    QTRY_VERIFY(c.connected() && !c.demo());
+    Controller c(nullptr, {}, profile.mountVerifier());
+    c.start(socket, profile.ciphertextRoot, true);
+    QTRY_VERIFY(c.connected() && !c.demo() && c.encryptedProfileViewReady());
     QTRY_VERIFY(c.capabilitiesReady());
     QTRY_COMPARE(c.chats()->rowCount(), 1);
     c.selectChat("fixture:one");

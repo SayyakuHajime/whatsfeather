@@ -84,6 +84,14 @@ class IncomingMediaUI(unittest.TestCase):
             time.sleep(0.02)
         self.fail(f"native UI did not reach {expected}; state={state_path.read_text()!r}")
 
+    def assert_private_profile_media(self, media):
+        self.assertEqual(media.parent.name, "media")
+        self.assertEqual(media.parent.parent.name, "profile")
+        for directory in (media.parent.parent.parent, media.parent.parent, media.parent):
+            info = directory.stat()
+            self.assertEqual(stat.S_IMODE(info.st_mode), 0o700, str(directory))
+            self.assertEqual(info.st_uid, os.geteuid(), str(directory))
+
     def test_rendered_download_and_retry_use_only_private_in_process_rpc(self):
         self.assertTrue(BINARY.is_file(), "Build the real Qt executable before integration tests")
         with tempfile.TemporaryDirectory(prefix="wf-media-ui-") as temp:
@@ -112,6 +120,7 @@ class IncomingMediaUI(unittest.TestCase):
                 self.assertEqual(ready[2:], ["2", CHAT_ID, MESSAGE_ID], "explicit Retry must produce exactly the second scoped request")
                 media = Path(ready[1])
                 self.assertTrue(media.is_file(), "ready response must reference the private synthetic media file")
+                self.assert_private_profile_media(media)
                 self.assertEqual(stat.S_IMODE(media.stat().st_mode), 0o600)
                 command.write_text("permissions-verified")
                 awaiting_open = self.wait_state(process, state, "await-document-open")
@@ -129,6 +138,8 @@ class IncomingMediaUI(unittest.TestCase):
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=3)
+                if process.stdout and not process.stdout.closed:
+                    process.stdout.close()
 
     def test_video_media_fixture_must_be_inside_private_runtime_dir(self):
         self.assertTrue(BINARY.is_file(), "Build the real Qt executable before integration tests")
@@ -210,6 +221,7 @@ class IncomingMediaUI(unittest.TestCase):
                 self.assertEqual(ready[2:], ["2", CHAT_ID, "fixture:incoming-video"])
                 media = Path(ready[1])
                 self.assertTrue(media.is_file(), "ready video must reference the private synthetic file")
+                self.assert_private_profile_media(media)
                 self.assertEqual(media.suffix, ".mp4")
                 self.assertEqual(stat.S_IMODE(media.stat().st_mode), 0o600)
                 command.write_text("permissions-verified")
@@ -308,6 +320,7 @@ class IncomingMediaUI(unittest.TestCase):
                 self.assertEqual(ready[2:], ["2", CHAT_ID, "fixture:incoming-sticker"])
                 media = Path(ready[1])
                 self.assertTrue(media.is_file(), "ready sticker must reference the private synthetic file")
+                self.assert_private_profile_media(media)
                 self.assertEqual(media.suffix, ".webp")
                 self.assertEqual(stat.S_IMODE(media.stat().st_mode), 0o600)
                 command.write_text("permissions-verified")
@@ -374,6 +387,7 @@ class IncomingMediaUI(unittest.TestCase):
                 self.assertEqual(ready[2:], ["2", CHAT_ID, IMAGE_ID])
                 media = Path(ready[1])
                 self.assertTrue(media.is_file(), "ready image must reference the private synthetic file")
+                self.assert_private_profile_media(media)
                 self.assertEqual(media.suffix, ".png")
                 self.assertEqual(stat.S_IMODE(media.stat().st_mode), 0o600)
                 command.write_text("permissions-verified")
