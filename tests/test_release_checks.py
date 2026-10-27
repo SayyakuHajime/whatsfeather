@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -37,6 +38,10 @@ def _write_current_notices(root: Path) -> None:
     generator = importlib.util.module_from_spec(generator_spec)
     sys.modules[generator_spec.name] = generator
     generator_spec.loader.exec_module(generator)
+    supplemental_license = root / generator.GO_RUNTIME_LICENSE[1]
+    supplemental_license.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / generator.GO_RUNTIME_LICENSE[1], supplemental_license)
+
     notice_path = root / "LICENSES" / "THIRD-PARTY-NOTICES.md"
     notice_path.parent.mkdir(parents=True, exist_ok=True)
     notice_path.write_text(generator.render_notices(root), encoding="utf-8")
