@@ -2,6 +2,7 @@
 #include "desktopnotifications.h"
 #include <QApplication>
 #include "communityfoldermodel.h"
+#include "legaldocuments.h"
 #include <QCommandLineParser>
 #include <QDebug>
 #include <QDir>
@@ -24,8 +25,9 @@ void runProductTest(QGuiApplication &, QQuickWindow *, Controller &,
                     const QString &, const QString &);
 void runSettingsTest(QGuiApplication &, QQuickWindow *, Controller &,
                      const QString &);
-QObject *startMediaDownloadFixture(QGuiApplication &, Controller &,
-                                   const QString &);
+void runAboutLegalTest(QGuiApplication &, QQuickWindow *,
+                       const LegalDocuments &);
+QObject *startMediaDownloadFixture(QGuiApplication &, Controller &);
 void runMediaDownloadTest(QGuiApplication &, QQuickWindow *, Controller &,
                           QObject *, const QString &, const QString &);
 QObject *startChatRosterFixture(QGuiApplication &, Controller &,
@@ -89,6 +91,7 @@ int main(int argc, char **argv) {
        {"list-message-test", "Exercise private synthetic inert list rendering"},
        {"text-card-test", "Exercise private synthetic inert text cards"},
        {"buttons-message-test", "Exercise private synthetic native inert ButtonsMessage rendering"},
+       {"about-legal-test", "Exercise offline legal documents in the synthetic native About UI"},
        {"icon-test", "Verify packaged application icon and desktop identity"}});
   parser.process(app);
   if (parser.isSet("demo") && parser.isSet("live")) {
@@ -100,6 +103,11 @@ int main(int argc, char **argv) {
        parser.isSet("socket") || !parser.isSet("data-dir") ||
        parser.value("data-dir").isEmpty())) {
     qCritical() << "Live-test scope requires explicit --live, --data-dir, and the managed local backend";
+    return 2;
+  }
+  if (parser.isSet("about-legal-test") &&
+      (!parser.isSet("demo") || parser.isSet("socket"))) {
+    qCritical() << "about-legal-test requires --demo and rejects --socket";
     return 2;
   }
   if (parser.isSet("live") &&
@@ -229,10 +237,12 @@ int main(int argc, char **argv) {
   updateNotificationSubscription();
   CommunityFolderModel communityFolders;
   communityFolders.setSourceModel(controller.chats());
+  LegalDocuments legalDocuments;
   QQmlApplicationEngine engine;
   engine.rootContext()->setContextProperty("communityFolders", &communityFolders);
   engine.rootContext()->setContextProperty("bridge", &controller);
   engine.rootContext()->setContextProperty("desktopNotifications", &desktopNotifications);
+  engine.rootContext()->setContextProperty("legalDocuments", &legalDocuments);
   engine.rootContext()->setContextProperty("initialDark", dark);
   engine.rootContext()->setContextProperty("systemFont",
                                            QGuiApplication::font().family());
@@ -305,7 +315,7 @@ int main(int argc, char **argv) {
     if (!buttonsFixture)
       return 1;
   } else if (parser.isSet("media-download-test")) {
-    mediaFixture = startMediaDownloadFixture(app, controller, dir);
+    mediaFixture = startMediaDownloadFixture(app, controller);
     if (!mediaFixture)
       return 1;
   } else {
@@ -379,6 +389,8 @@ int main(int argc, char **argv) {
                    "/.hermes/parity-implementation/settings-theme-connection/qa-captures";
     runSettingsTest(app, window, controller, captureDir);
   }
+  if (parser.isSet("about-legal-test"))
+    runAboutLegalTest(app, window, legalDocuments);
   QTimer closeTest;
   if (parser.isSet("draft-close-test")) {
     closeTest.setInterval(50);

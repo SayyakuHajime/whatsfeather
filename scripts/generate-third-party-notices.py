@@ -7,6 +7,7 @@ import argparse
 import gzip
 import hashlib
 import re
+import stat
 import sys
 import tarfile
 import zlib
@@ -26,8 +27,8 @@ LICENSE_NAME = re.compile(r"(?:LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE|PATENTS)
 SYSTEM_RUNTIME_PACKAGES = (
     (
         "ffmpeg",
-        "PKGBUILD runtime dependency",
-        "GPL-3.0-only",
+        "PKGBUILD runtime dependency; minimum reviewed package version 2:9.0.2-2.3",
+        "GPL-3.0-or-later (reviewed candidate .PKGINFO metadata; not legal approval)",
         "https://archlinux.org/packages/extra/x86_64/ffmpeg/",
     ),
     (
@@ -41,6 +42,12 @@ SYSTEM_RUNTIME_PACKAGES = (
         "PKGBUILD runtime dependency",
         "GPL-3.0-only; LGPL-3.0-only; LicenseRef-Qt-Commercial; Qt-GPL-exception-1.0",
         "https://archlinux.org/packages/extra/x86_64/qt6-declarative/",
+    ),
+    (
+        "qt6-imageformats",
+        "PKGBUILD runtime dependency",
+        "GPL-3.0-only; LGPL-3.0-only; LicenseRef-Qt-Commercial; Qt-GPL-exception-1.0",
+        "https://archlinux.org/packages/extra/x86_64/qt6-imageformats/",
     ),
     (
         "qt6-multimedia",
@@ -59,6 +66,77 @@ SYSTEM_RUNTIME_PACKAGES = (
         "PKGBUILD runtime dependency",
         "GPL-3.0-only; LGPL-3.0-only; LicenseRef-Qt-Commercial; Qt-GPL-exception-1.0",
         "https://archlinux.org/packages/extra/x86_64/qt6-svg/",
+    ),
+    (
+        "gocryptfs",
+        "PKGBUILD exact runtime dependency 2.6.1.r20261022.ga8b36f0-1; provides `/usr/bin/gocryptfs`",
+        "Not independently assessed in this inventory",
+        "https://archlinux.org/packages/extra/x86_64/gocryptfs/",
+    ),
+    (
+        "libsecret",
+        "PKGBUILD runtime dependency; Provides the `secret-tool` executable at `/usr/bin/secret-tool`",
+        "Not independently assessed in this inventory",
+        "https://archlinux.org/packages/extra/x86_64/libsecret/",
+    ),
+    (
+        "fuse3",
+        "PKGBUILD runtime dependency; Provides the `fusermount3` helper at `/usr/bin/fusermount3`",
+        "Not independently assessed in this inventory",
+        "https://archlinux.org/packages/extra/x86_64/fuse3/",
+    ),
+)
+
+MAX_REVIEWED_GENERATED_SOURCE_BYTES = 512 * 1024
+MAX_SUPPLEMENTAL_LICENSE_BYTES = 1024 * 1024
+MODERNC_MODULE = "modernc.org/libc"
+MODERNC_VERSION = "v1.74.4"
+MODERNC_GO_SUM_H1 = "h1:fX1Omw4o2/1C2iRkkIsrQTasJQldLhRmuPreXLoWs9k="
+MODERNC_VENDOR_ARCHIVE_SHA256 = "375718d79147fa821e2672f9bc0b5e25f309a3ad7604ae81ff4850c395d38804"
+MODERNC_GENERATED_SOURCES = (
+    (
+        "vendor/modernc.org/libc/sys/types/types_linux_amd64.go",
+        "1ada8b2599b13281b8fe191cfb24c02896ec3781b95a3b5cf76e1d74424eea2e",
+        ((
+            "Observed LGPL-2.1-or-later header attribution",
+            "// Copyright (C) 1991-2020 Free Software Foundation, Inc.",
+            "//    <https://www.gnu.org/licenses/>.",
+        ),),
+    ),
+    (
+        "vendor/modernc.org/libc/uuid/uuid/uuid_linux_amd64.go",
+        "c677ffac9af69102fabc82443b8799b4071c7ead9f02237bb2f01af7782af428",
+        (
+            (
+                "Observed BSD-style UUID attribution and permission notice",
+                "// Public include file for the UUID library",
+                "// %End-Header%",
+            ),
+            (
+                "Observed LGPL-2.1-or-later header attribution",
+                "// Copyright (C) 1991-2020 Free Software Foundation, Inc.",
+                "//    <https://www.gnu.org/licenses/>.",
+            ),
+            (
+                "Observed GPL-3.0-or-later WITH GCC-exception-3.1 header attribution",
+                "// This file is part of GCC.",
+                "// <http://www.gnu.org/licenses/>.",
+            ),
+        ),
+    ),
+)
+SUPPLEMENTAL_LICENSES = (
+    (
+        "GNU Lesser General Public License version 2.1",
+        "LICENSES/supplemental/GNU-LGPL-2.1.txt",
+        "20e50fe7aae3e56378ebf0417d9de904f55a0e61e4df315333e632a4d3555d95",
+        "https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt",
+    ),
+    (
+        "GCC Runtime Library Exception version 3.1",
+        "LICENSES/supplemental/GCC-Runtime-Library-Exception-3.1.txt",
+        "9d6b43ce4d8de0c878bf16b54d8e7a10d9bd42b75178153e3af6a815bdc90f74",
+        "https://gnu.googlesource.com/gcc/+/f71fe877da75e9be746b6bbc27cea8007c83c983/COPYING.RUNTIME",
     ),
 )
 
@@ -116,12 +194,41 @@ def _check_archive_expanded_size(archive_path: Path) -> None:
         raise ValueError(f"cannot decompress vendored source archive: {exc}") from exc
 
 
+def _validate_archive_member_name(name: str) -> PurePosixPath:
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("non-canonical vendored archive member path") from exc
+    path = PurePosixPath(name)
+    if (
+        not name
+        or "\\" in name
+        or any(ord(character) < 32 or ord(character) == 127 for character in name)
+        or path.is_absolute()
+        or path.as_posix() != name
+        or not path.parts
+        or any(part in {".", ".."} for part in path.parts)
+        or re.match(r"^[A-Za-z]:", path.parts[0])
+    ):
+        raise ValueError(f"non-canonical vendored archive member path: {name!r}")
+    return path
+
+
 def _bounded_archive_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     members: list[tarfile.TarInfo] = []
     total_bytes = 0
+    seen_names: set[str] = set()
     for member in archive:
         if len(members) >= MAX_ARCHIVE_MEMBERS:
             raise ValueError("vendored source archive exceeds the member-count limit")
+        _validate_archive_member_name(member.name)
+        if member.name in seen_names:
+            raise ValueError(f"duplicate vendored archive member path: {member.name}")
+        seen_names.add(member.name)
+        if not member.isfile() and not member.isdir():
+            raise ValueError(f"unsupported vendored archive member type: {member.name}")
+        if member.isdir() and member.size != 0:
+            raise ValueError(f"vendored archive directory member has nonzero size: {member.name}")
         if member.size < 0 or member.size > MAX_ARCHIVE_MEMBER_BYTES:
             raise ValueError(f"vendored source archive exceeds the member-size limit: {member.name}")
         total_bytes += member.size
@@ -131,66 +238,115 @@ def _bounded_archive_members(archive: tarfile.TarFile) -> list[tarfile.TarInfo]:
     return members
 
 
+def _read_archive_member(archive: tarfile.TarFile, member: tarfile.TarInfo, limit: int, label: str) -> bytes:
+    if not member.isfile():
+        raise ValueError(f"{label} is not a regular file: {member.name}")
+    if member.size > limit:
+        raise ValueError(f"{label} exceeds the size limit: {member.name}")
+    extracted = archive.extractfile(member)
+    if extracted is None:
+        raise ValueError(f"cannot read {label}: {member.name}")
+    raw = extracted.read(limit + 1)
+    if len(raw) != member.size or len(raw) > limit:
+        raise ValueError(f"{label} size mismatch: {member.name}")
+    return raw
+
+
 def _archive_module_entries(
     archive: tarfile.TarFile, archive_members: list[tarfile.TarInfo]
 ) -> list[tuple[str, str]]:
     members = [member for member in archive_members if member.name == "vendor/modules.txt"]
     if len(members) != 1:
         raise ValueError("vendored source archive must contain exactly one vendor/modules.txt")
-    member = members[0]
-    if not member.isfile():
-        raise ValueError("vendored modules manifest is not a regular file")
-    if member.size > MAX_MODULE_MANIFEST_BYTES:
-        raise ValueError("vendored modules manifest exceeds the size limit")
-    extracted = archive.extractfile(member)
-    if extracted is None:
-        raise ValueError("cannot read vendored modules manifest")
-    raw = extracted.read(MAX_MODULE_MANIFEST_BYTES + 1)
-    if len(raw) != member.size or len(raw) > MAX_MODULE_MANIFEST_BYTES:
-        raise ValueError("vendored modules manifest size mismatch")
+    raw = _read_archive_member(archive, members[0], MAX_MODULE_MANIFEST_BYTES, "vendored modules manifest")
     try:
         manifest = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("vendored modules manifest is not UTF-8 text") from exc
-    return _module_entries(manifest, f"{archive.name}:{member.name}")
+    return _module_entries(manifest, f"{archive.name}:vendor/modules.txt")
 
 
-def _license_documents(root: Path) -> list[LicenseDocument]:
-    backend = root / "backend"
-    archive_path = backend / "vendor.tar.gz"
-    documents: list[LicenseDocument] = []
-    total_bytes = 0
-    seen: set[str] = set()
+def _module_for_notice_path(path: PurePosixPath, modules: dict[str, str]) -> str | None:
+    if len(path.parts) < 3 or path.parts[0] != "vendor":
+        return None
+    module_directory = path.parts[1:-1]
+    matches = [
+        module
+        for module in modules
+        if len(PurePosixPath(module).parts) <= len(module_directory)
+        and module_directory[:len(PurePosixPath(module).parts)] == PurePosixPath(module).parts
+    ]
+    if not matches:
+        return None
+    return max(matches, key=lambda module: len(PurePosixPath(module).parts))
 
-    if archive_path.stat().st_size > MAX_ARCHIVE_COMPRESSED_BYTES:
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _vendored_material(root: Path) -> tuple[list[LicenseDocument], dict[str, str]]:
+    archive_path = root / "backend" / "vendor.tar.gz"
+    archive_stat = archive_path.lstat()
+    if not stat.S_ISREG(archive_stat.st_mode):
+        raise ValueError("vendored source archive is not a regular file")
+    if archive_stat.st_size > MAX_ARCHIVE_COMPRESSED_BYTES:
         raise ValueError("vendored source archive exceeds the compressed size limit")
     _check_archive_expanded_size(archive_path)
 
+    documents: list[LicenseDocument] = []
+    generated_sources: dict[str, str] = {}
+    total_bytes = 0
+    seen: set[str] = set()
+
     with tarfile.open(archive_path, mode="r:gz") as archive:
         archive_members = _bounded_archive_members(archive)
-        modules = _archive_module_entries(archive, archive_members)
-        expected = {module: version for module, version in modules}
+        modules = dict(_archive_module_entries(archive, archive_members))
+        has_reviewed_module = MODERNC_MODULE in modules
+        if has_reviewed_module:
+            if modules[MODERNC_MODULE] != MODERNC_VERSION:
+                raise ValueError(
+                    f"reviewed generated-source coverage requires {MODERNC_MODULE}@{MODERNC_VERSION}; "
+                    "review the new vendored version before regeneration"
+                )
+            if _sha256_file(archive_path) != MODERNC_VENDOR_ARCHIVE_SHA256:
+                raise ValueError("vendored archive changed from the reviewed modernc source identity")
+            sum_path = root / "backend" / "go.sum"
+            expected_sum = f"{MODERNC_MODULE} {MODERNC_VERSION} {MODERNC_GO_SUM_H1}"
+            try:
+                go_sum_lines = sum_path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                raise ValueError("go.sum is unavailable for reviewed modernc source identity") from exc
+            if expected_sum not in go_sum_lines:
+                raise ValueError("go.sum does not contain the reviewed modernc module checksum")
+
+        expected_sources = {path: digest for path, digest, _ in MODERNC_GENERATED_SOURCES} if has_reviewed_module else {}
         for member in archive_members:
-            parts = PurePosixPath(member.name).parts
-            if len(parts) < 3 or parts[0] != "vendor":
+            archive_path_value = _validate_archive_member_name(member.name)
+            if member.name in expected_sources:
+                raw = _read_archive_member(
+                    archive, member, MAX_REVIEWED_GENERATED_SOURCE_BYTES, "reviewed generated source"
+                )
+                digest = hashlib.sha256(raw).hexdigest()
+                if digest != expected_sources[member.name]:
+                    raise ValueError(f"reviewed generated source changed; re-review required: {member.name}")
+                try:
+                    generated_sources[member.name] = raw.decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"reviewed generated source is not UTF-8 text: {member.name}") from exc
+
+            module = _module_for_notice_path(archive_path_value, modules)
+            filename = archive_path_value.name
+            if module is None or not LICENSE_NAME.fullmatch(filename):
                 continue
-            module = "/".join(parts[1:-1])
-            filename = parts[-1]
-            if module not in expected or not LICENSE_NAME.fullmatch(filename):
-                continue
-            if not member.isfile():
-                raise ValueError(f"vendored license path is not a regular file: {member.name}")
-            if member.size > MAX_LICENSE_FILE_BYTES:
-                raise ValueError(f"vendored license file exceeds size limit: {member.name}")
             if member.name in seen:
                 raise ValueError(f"duplicate vendored license path: {member.name}")
             seen.add(member.name)
-            extracted = archive.extractfile(member)
-            if extracted is None:
-                raise ValueError(f"cannot read vendored license file: {member.name}")
-            raw = extracted.read(MAX_LICENSE_FILE_BYTES + 1)
-            if len(raw) != member.size or len(raw) > MAX_LICENSE_FILE_BYTES:
-                raise ValueError(f"vendored license size mismatch: {member.name}")
+            raw = _read_archive_member(archive, member, MAX_LICENSE_FILE_BYTES, "vendored license file")
             total_bytes += len(raw)
             if total_bytes > MAX_TOTAL_LICENSE_BYTES:
                 raise ValueError("vendored license texts exceed the total size limit")
@@ -201,7 +357,7 @@ def _license_documents(root: Path) -> list[LicenseDocument]:
             documents.append(
                 LicenseDocument(
                     module=module,
-                    version=expected[module],
+                    version=modules[module],
                     path=member.name,
                     content=content,
                     sha256=hashlib.sha256(raw).hexdigest(),
@@ -209,10 +365,45 @@ def _license_documents(root: Path) -> list[LicenseDocument]:
             )
 
     modules_with_notices = {document.module for document in documents}
-    missing = sorted(set(expected) - modules_with_notices)
+    missing = sorted(set(modules) - modules_with_notices)
     if missing:
         raise ValueError("vendored module has no root license or notice file: " + ", ".join(missing))
-    return sorted(documents, key=lambda document: (document.module, document.path.casefold()))
+    missing_sources = sorted(set(expected_sources) - generated_sources.keys())
+    if missing_sources:
+        raise ValueError("reviewed generated source is missing; re-review required: " + ", ".join(missing_sources))
+    return sorted(documents, key=lambda document: (document.module, document.path.casefold())), generated_sources
+
+
+def _license_documents(root: Path) -> list[LicenseDocument]:
+    documents, _ = _vendored_material(root)
+    return documents
+
+
+def _source_excerpt(source: str, start: str, end: str, path: str) -> str:
+    lines = source.splitlines()
+    try:
+        start_index = lines.index(start)
+        end_index = next(index for index in range(start_index, len(lines)) if lines[index] == end)
+    except (ValueError, StopIteration) as exc:
+        raise ValueError(f"reviewed source header excerpt changed; re-review required: {path}") from exc
+    return "\n".join(lines[start_index:end_index + 1]) + "\n"
+
+
+def _supplemental_license(root: Path, label: str, relative_path: str, expected_sha256: str, origin: str) -> tuple[str, str, str]:
+    path = root / relative_path
+    file_stat = path.lstat()
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ValueError(f"supplemental license text is not a regular file: {relative_path}")
+    if file_stat.st_size > MAX_SUPPLEMENTAL_LICENSE_BYTES:
+        raise ValueError(f"supplemental license text exceeds the size limit: {relative_path}")
+    raw = path.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != expected_sha256:
+        raise ValueError(f"supplemental license text differs from canonical source: {relative_path}")
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"supplemental license text is not UTF-8: {relative_path}") from exc
+    return label, content, f"{relative_path} — SHA-256 `{expected_sha256}`; source: <{origin}>"
 
 
 def _fence(content: str) -> str:
@@ -220,24 +411,74 @@ def _fence(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _render_modernc_generated_source_coverage(root: Path, generated_sources: dict[str, str]) -> list[str]:
+    if not generated_sources:
+        return []
+    backend = root / "backend"
+    archive_sha = _sha256_file(backend / "vendor.tar.gz")
+    lines = [
+        "## Reviewed modernc generated-source header coverage",
+        "",
+        f"This bounded review is tied to `modernc.org/libc@{MODERNC_VERSION}` in `backend/vendor.tar.gz` ",
+        f"(SHA-256 `{archive_sha}`) and `backend/go.sum` checksum `{MODERNC_GO_SUM_H1}`. ",
+        "It retains the reviewed Linux/amd64 generated-file header notices only; it is not a scan or ",
+        "license classification of all generated sources.",
+        "",
+        "The following are **observed source-header terms and attributions**, not a legal determination ",
+        "that any term applies to all generated declarations or the resulting executable:",
+        "",
+    ]
+    for path, expected_sha256, excerpts in MODERNC_GENERATED_SOURCES:
+        source = generated_sources[path]
+        lines.extend([f"### `{path}`", "", f"SHA-256: `{expected_sha256}`", ""])
+        for label, start, end in excerpts:
+            excerpt = _source_excerpt(source, start, end, path)
+            lines.extend([f"**{label}.**", ""])
+            fence = _fence(excerpt)
+            lines.extend([f"{fence}go", excerpt.rstrip("\n"), fence, ""])
+
+    lines.extend(
+        [
+            "Observed terms are LGPL-2.1-or-later in the GNU C Library-derived header; GPL-3.0-or-later ",
+            "WITH GCC-exception-3.1 in the GCC header; and the BSD-style Theodore Ts'o UUID notice. ",
+            "The complete canonical LGPL-2.1 and GCC Runtime Library Exception 3.1 texts follow below. ",
+            "The root `LICENSE` already contains the project GPL-3 text; these notices do not alter it.",
+            "",
+            "Header presence alone does not settle whether terms apply to generated declarations, retained ",
+            "executable material, or distribution. Applicability, static-link/relink route, source delivery, ",
+            "and the corresponding-source/reproducible-build package require legal and maintainer review. ",
+            "The source availability and reproducible build instructions remain unresolved; this section ",
+            "does not provide them.",
+            "",
+        ]
+    )
+    for label, relative_path, expected_sha256, origin in SUPPLEMENTAL_LICENSES:
+        title, content, provenance = _supplemental_license(
+            root, label, relative_path, expected_sha256, origin
+        )
+        lines.extend([f"### {title}", "", provenance, ""])
+        fence = _fence(content)
+        lines.extend([f"{fence}text", content.rstrip("\n"), fence, ""])
+    return lines
+
+
 def render_notices(root: Path) -> str:
-    documents = _license_documents(root)
+    documents, generated_sources = _vendored_material(root)
     modules = sorted({(document.module, document.version) for document in documents})
     lines = [
         "# Third-party software notices",
         "",
-        "This file reproduces root-level license, copyright, patent, and notice files",
-        "for the Go modules listed in the `vendor/modules.txt` manifest inside the",
-        "pinned `backend/vendor.tar.gz` source archive. Versions and file contents are",
-        "read from that archive. Run",
+        "This file reproduces license, copyright, patent, and notice files located within the vendored Go",
+        "module trees listed in `vendor/modules.txt` in the pinned `backend/vendor.tar.gz` archive. Files",
+        "are attributed to their longest matching vendored-module ancestor. Versions and file contents are",
+        "read from the pinned archive. Run",
         "`python3 scripts/generate-third-party-notices.py --check` to verify this file.",
         "",
-        "This is a mechanical attribution inventory, not a legal opinion, a license-",
-        "compatibility decision, source-provenance proof, or approval to redistribute.",
-        "Original WhatsFeather code and the separately listed assets are licensed as",
-        "described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.",
+        "This is a mechanical attribution inventory, not a legal opinion, a license-compatibility decision,",
+        "source-provenance proof, or approval to redistribute. Original WhatsFeather code and the separately",
+        "listed assets are licensed as described by the root `LICENSE` and `LICENSES/ASSET-LICENSES.md`.",
         "",
-        f"Vendored Go modules: {len(modules)}; reproduced root notice files: {len(documents)}.",
+        f"Vendored Go modules: {len(modules)}; reproduced vendored notice files: {len(documents)}.",
         "",
         "## Vendored Go modules",
         "",
@@ -259,18 +500,23 @@ def render_notices(root: Path) -> str:
             body += "\n"
         lines.extend([f"{fence}text", body.rstrip("\n"), fence, ""])
 
+    lines.extend(_render_modernc_generated_source_coverage(root, generated_sources))
     lines.extend(
         [
             "## System-provided runtime packages",
             "",
-            "The Arch/CachyOS PKGBUILD directly declares `ffmpeg` and the listed Qt6",
-            "base, declarative, multimedia, and svg runtime dependencies. The",
-            "`qt6-multimedia-ffmpeg` row records a package observed on the build host;",
-            "it is not a direct PKGBUILD dependency. None is bundled in the application.",
-            "These license expressions",
-            "below are package metadata, not a complete inventory of transitive system",
-            "libraries. The target distribution supplies the corresponding license",
-            "files with each package; verify downstream metadata for other distributions.",
+            "Qt and FFmpeg are system-provided, not bundled in the app artifact. The current PKGBUILD",
+            "directly declares `ffmpeg>=2:9.0.2-2.3`, `gocryptfs=2.6.1.r20261022.ga8b36f0-1`, `libsecret`,",
+            "`fuse3`, and Qt6 `base`, `declarative`, `imageformats`, `multimedia`, and `svg`. The minimum FFmpeg package version is the reviewed candidate baseline; future FFmpeg versions are not pre-approved and still require security and ABI review.",
+            "The `qt6-multimedia-ffmpeg` row records a host-side plugin provider, not a direct PKGBUILD dependency.",
+            "",
+            "The encrypted-profile implementation invokes `/usr/bin/gocryptfs`, `/usr/bin/secret-tool`,",
+            "and `/usr/bin/fusermount3`. The declared exact `gocryptfs` package provides the engine;",
+            "`libsecret` provides the `secret-tool` executable; and `fuse3` provides the `fusermount3`",
+            "helper. These are explicitly declared runtime dependencies. License metadata for these three",
+            "packages is not independently assessed here.",
+            "",
+            "Package license expressions below are distro metadata, not a complete inventory of transitive system libraries. Qt license choices are alternatives in package metadata; this inventory does not select one or assert all listed options are required. The target distribution supplies corresponding license files with each package; verify downstream metadata for other distributions.",
             "",
             "| Package | Role | Arch package license metadata | Package record |",
             "|---|---|---|---|",
@@ -281,10 +527,9 @@ def render_notices(root: Path) -> str:
     lines.extend(
         [
             "",
-            "Qt package metadata includes GPL-3.0-only, LGPL-3.0-only,",
-            "`LicenseRef-Qt-Commercial`, and `Qt-GPL-exception-1.0`; FFmpeg package",
-            "metadata reports GPL-3.0-only. These external packages remain governed by",
-            "their own terms and are not relicensed by the WhatsFeather project license.",
+            "Qt package metadata lists GPL-3.0-only, LGPL-3.0-only, `LicenseRef-Qt-Commercial`, and",
+            "`Qt-GPL-exception-1.0`; these are metadata choices, not a claim that every option is required.",
+            "The reviewed candidate FFmpeg package's `.PKGINFO` reports `GPL-3.0-or-later`. This is package metadata, not legal approval, and does not change the project's authorized `GPL-3.0-only` selection. External packages remain governed by their own terms and are not relicensed by the WhatsFeather project license.",
             "",
         ]
     )

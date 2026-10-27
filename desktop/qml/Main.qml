@@ -18,6 +18,10 @@ ApplicationWindow {
     property string forwardTargetChatId: ""
     property string selectedHubMethod: ""
     property string groupActionError: ""
+    property string legalDocumentId: ""
+    property string legalDocumentTitle: "Legal information"
+    property string legalDocumentText: ""
+    property string legalDocumentError: ""
     property bool selectionMode: false
     property var selectedMessageIds: []
     property string highlightedMessage: ""
@@ -114,6 +118,16 @@ ApplicationWindow {
         selectedHubMethod = method;
         bridge.loadHub(method, {});
         hubDialog.open();
+    }
+
+    function openLegalDocument(documentId) {
+        const result = legalDocuments.load(String(documentId || ""));
+        legalDocumentId = result.ok ? result.id : "";
+        legalDocumentTitle = result.title || "Legal information";
+        legalDocumentText = result.ok ? result.text : "";
+        legalDocumentError = result.ok ? "" : (result.error || "The legal document could not be loaded from the application.");
+        legalDocumentDialog.open();
+        return result.ok;
     }
 
     function selectMessage(message) {
@@ -253,6 +267,8 @@ ApplicationWindow {
     Shortcut {
         sequence: "Escape"
         onActivated: {
+            if (legalDocumentDialog.opened) { legalDocumentDialog.close(); return; }
+            if (about.opened) { about.close(); return; }
             if (pollVoteDialog.opened) { pollVoteDialog.close(); return; }
             if (mediaViewer.opened) { mediaViewer.close(); return; }
             if (attachmentDialog.opened) { bridge.clearAttachment(); attachmentDialog.close(); return; }
@@ -1069,6 +1085,7 @@ ApplicationWindow {
 
     Menu {
         id: sidebarMenu
+        objectName: "sidebarMenu"
 
         MenuItem {
             text: "Message yourself"
@@ -1119,6 +1136,7 @@ ApplicationWindow {
         }
 
         MenuItem {
+            objectName: "aboutMenuItem"
             text: "About WhatsFeather"
             onTriggered: about.open()
         }
@@ -2359,14 +2377,167 @@ ApplicationWindow {
         title: "WhatsFeather"
         modal: true
         standardButtons: Dialog.Close
+        onOpened: projectLicenseButton.forceActiveFocus()
 
-        contentItem: Label {
-            textFormat: Text.PlainText
-            text: "A native Linux messaging preview. Unofficial and not affiliated with WhatsApp or Meta."
-            color: app.ink
-            wrapMode: Text.WordWrap
+        contentItem: ColumnLayout {
+            spacing: 12
+
+            Label {
+                objectName: "aboutDisclaimer"
+                textFormat: Text.PlainText
+                text: "A native Linux messaging preview. Unofficial and not affiliated with WhatsApp or Meta."
+                color: app.ink
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            Label {
+                objectName: "aboutLicenseSummary"
+                textFormat: Text.PlainText
+                text: "Project code is licensed under GPL-3.0-only. Its full text grants permission to redistribute copies under its terms and states that the software comes with no warranty. Third-party components may have different terms."
+                color: app.muted
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            PanelAction {
+                id: projectLicenseButton
+                objectName: "projectLicenseButton"
+                text: "Project license (GPL-3.0-only)"
+                Layout.fillWidth: true
+                onClicked: app.openLegalDocument("project-license")
+            }
+
+            PanelAction {
+                objectName: "assetLicensesButton"
+                text: "Asset license ledger"
+                Layout.fillWidth: true
+                onClicked: app.openLegalDocument("asset-licenses")
+            }
+
+            PanelAction {
+                objectName: "thirdPartyNoticesButton"
+                text: "Third-party notices"
+                Layout.fillWidth: true
+                onClicked: app.openLegalDocument("third-party-notices")
+            }
+        }
+    }
+
+    Dialog {
+        id: legalDocumentDialog
+        objectName: "legalDocumentDialog"
+        property string documentId: app.legalDocumentId
+
+        anchors.centerIn: parent
+        width: Math.min(640, app.width - 32)
+        height: Math.min(620, app.height - 32)
+        title: app.legalDocumentTitle
+        modal: true
+        padding: 16
+        standardButtons: Dialog.NoButton
+        onOpened: legalDocumentClose.forceActiveFocus()
+        onClosed: {
+            app.legalDocumentId = ""
+            app.legalDocumentTitle = "Legal information"
+            app.legalDocumentText = ""
+            app.legalDocumentError = ""
+        }
+        background: Rectangle { color: app.surface; radius: 16; border.color: app.line }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            Label {
+                objectName: "legalDocumentOfflineHint"
+                textFormat: Text.PlainText
+                text: "Offline copy embedded with this application. Read-only and selectable. Scroll with the mouse wheel or Page Up/Page Down."
+                color: app.muted
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+            }
+
+            Label {
+                objectName: "legalDocumentError"
+                textFormat: Text.PlainText
+                text: app.legalDocumentError
+                color: app.danger
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                visible: text.length > 0
+            }
+
+            Flickable {
+                id: legalDocumentScroll
+                objectName: "legalDocumentScroll"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                Layout.minimumHeight: 120
+                visible: app.legalDocumentError.length === 0 && app.legalDocumentText.length > 0
+                clip: true
+                contentWidth: width
+                contentHeight: Math.max(height, legalDocumentBody.height)
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                TextArea {
+                    id: legalDocumentBody
+                    objectName: "legalDocumentText"
+                    width: legalDocumentScroll.width
+                    height: Math.max(legalDocumentScroll.height, contentHeight + topPadding + bottomPadding)
+                    text: app.legalDocumentText
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.Wrap
+                    readOnly: true
+                    selectByMouse: true
+                    selectByKeyboard: true
+                    persistentSelection: true
+                    activeFocusOnTab: true
+                    color: app.ink
+                    selectionColor: app.active
+                    selectedTextColor: app.ink
+                    padding: 12
+                    background: Rectangle { color: app.chrome; radius: 10; border.color: app.line }
+                    Accessible.name: app.legalDocumentTitle
+                    Accessible.description: "Read-only offline legal document. Use Page Down and Page Up to scroll."
+
+                    Keys.onPressed: function(event) {
+                        const maximum = Math.max(0, legalDocumentScroll.contentHeight - legalDocumentScroll.height)
+                        if (event.key === Qt.Key_PageDown) {
+                            legalDocumentScroll.contentY = Math.min(maximum, legalDocumentScroll.contentY + legalDocumentScroll.height)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_PageUp) {
+                            legalDocumentScroll.contentY = Math.max(0, legalDocumentScroll.contentY - legalDocumentScroll.height)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Escape) {
+                            legalDocumentDialog.close()
+                            event.accepted = true
+                        }
+                    }
+                }
+            }
         }
 
+        footer: Item {
+            implicitHeight: 56
+            PanelAction {
+                id: legalDocumentClose
+                objectName: "legalDocumentCloseButton"
+                anchors.right: parent.right
+                anchors.rightMargin: 4
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Close"
+                onClicked: legalDocumentDialog.close()
+                Keys.onPressed: function(event) {
+                    if (event.key === Qt.Key_Escape) {
+                        legalDocumentDialog.close()
+                        event.accepted = true
+                    }
+                }
+            }
+        }
     }
 
     component PanelAction: Button {

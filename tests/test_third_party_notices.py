@@ -131,7 +131,138 @@ class ThirdPartyNoticeTests(unittest.TestCase):
         self.assertIn("`example.test/module` `v2.4.6`", rendered)
         self.assertIn(license_text.decode("utf-8"), rendered)
         self.assertIn(copyright_text.decode("utf-8"), rendered)
-        self.assertNotIn(nested_text.decode("utf-8"), rendered)
+        self.assertIn(nested_text.decode("utf-8"), rendered)
+        self.assertIn("Source path: `vendor/example.test/module/subdir/LICENSE`", rendered)
+
+    def test_render_attributes_nested_notice_files_to_the_longest_module_ancestor(self) -> None:
+        module = _generator_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            entries = [
+                ("vendor/modules.txt", b"# example.test/module v1.0.0\n# example.test/module/child v2.0.0\n"),
+                ("vendor/example.test/module/LICENSE", b"parent license\n"),
+                ("vendor/example.test/module/docs/NOTICE", b"parent nested notice\n"),
+                ("vendor/example.test/module/child/LICENSE", b"child license\n"),
+                ("vendor/example.test/module/child/docs/COPYING", b"child nested copying\n"),
+            ]
+            _write_archive(root / "backend/vendor.tar.gz", entries)
+
+            documents = module._license_documents(root)
+
+        attribution = {document.path: document.module for document in documents}
+        self.assertEqual(attribution, {
+            "vendor/example.test/module/LICENSE": "example.test/module",
+            "vendor/example.test/module/docs/NOTICE": "example.test/module",
+            "vendor/example.test/module/child/LICENSE": "example.test/module/child",
+            "vendor/example.test/module/child/docs/COPYING": "example.test/module/child",
+        })
+
+    def test_render_rejects_noncanonical_or_traversing_archive_paths(self) -> None:
+        module = _generator_module()
+        unsafe_paths = (
+            "../vendor/escape/LICENSE",
+            "/vendor/example.test/module/absolute.txt",
+            "vendor//example.test/module/repeated-slash.txt",
+            "vendor/example.test/module/./dot.txt",
+            "vendor/example.test/module/../../escape.txt",
+            "vendor\\\\example.test\\\\module\\\\backslash.txt",
+        )
+        for unsafe_path in unsafe_paths:
+            with self.subTest(path=unsafe_path), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _write_archive(root / "backend/vendor.tar.gz", [
+                    ("vendor/modules.txt", b"# example.test/module v1.2.3\n"),
+                    ("vendor/example.test/module/LICENSE", b"license\n"),
+                    (unsafe_path, b"untrusted\n"),
+                ])
+                with self.assertRaisesRegex(ValueError, "non-canonical vendored archive member path"):
+                    module.render_notices(root)
+
+    def test_render_rejects_unsafe_archive_entry_types_even_outside_notice_paths(self) -> None:
+        module = _generator_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive_path = root / "backend/vendor.tar.gz"
+            archive_path.parent.mkdir(parents=True)
+            with tarfile.open(archive_path, "w:gz") as archive:
+                for name, content in [
+                    ("vendor/modules.txt", b"# example.test/module v1.2.3\n"),
+                    ("vendor/example.test/module/LICENSE", b"license\n"),
+                ]:
+                    info = tarfile.TarInfo(name)
+                    info.size = len(content)
+                    archive.addfile(info, io.BytesIO(content))
+                link = tarfile.TarInfo("vendor/example.test/module/source.go")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "../../outside.go"
+                archive.addfile(link)
+
+            with self.assertRaisesRegex(ValueError, "unsupported vendored archive member type"):
+                module.render_notices(root)
+
+    def test_nested_notices_still_obey_per_file_and_aggregate_text_limits(self) -> None:
+        module = _generator_module()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_archive(root / "backend/vendor.tar.gz", [
+                ("vendor/modules.txt", b"# example.test/module v1.2.3\n"),
+                ("vendor/example.test/module/LICENSE", b"L\n"),
+                ("vendor/example.test/module/deep/NOTICE", b"12345"),
+            ])
+            with patch.object(module, "MAX_LICENSE_FILE_BYTES", 4):
+                with self.assertRaisesRegex(ValueError, "license file exceeds the size limit"):
+                    module.render_notices(root)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_archive(root / "backend/vendor.tar.gz", [
+                ("vendor/modules.txt", b"# example.test/module v1.2.3\n"),
+                ("vendor/example.test/module/LICENSE", b"123456"),
+                ("vendor/example.test/module/deep/NOTICE", b"abcdef"),
+            ])
+            with patch.object(module, "MAX_TOTAL_LICENSE_BYTES", 10):
+                with self.assertRaisesRegex(ValueError, "vendored license texts exceed the total size limit"):
+                    module.render_notices(root)
+
+    def test_generated_notices_retain_reviewed_modernc_header_attribution_and_terms(self) -> None:
+        module = _generator_module()
+        rendered = module.render_notices(ROOT)
+        self.assertIn("## Reviewed modernc generated-source header coverage", rendered)
+        self.assertIn("vendor/modernc.org/libc/sys/types/types_linux_amd64.go", rendered)
+        self.assertIn("1ada8b2599b13281b8fe191cfb24c02896ec3781b95a3b5cf76e1d74424eea2e", rendered)
+        self.assertIn("vendor/modernc.org/libc/uuid/uuid/uuid_linux_amd64.go", rendered)
+        self.assertIn("c677ffac9af69102fabc82443b8799b4071c7ead9f02237bb2f01af7782af428", rendered)
+        self.assertIn("Copyright (C) 1991-2020 Free Software Foundation, Inc.", rendered)
+        self.assertIn("Copyright (C) 1996, 1997, 1998 Theodore Ts'o.", rendered)
+        self.assertIn("This file is part of GCC.", rendered)
+        self.assertIn("LGPL-2.1-or-later", rendered)
+        self.assertIn("GPL-3.0-or-later WITH GCC-exception-3.1", rendered)
+        self.assertIn("GNU LESSER GENERAL PUBLIC LICENSE", rendered)
+        self.assertIn("GCC RUNTIME LIBRARY EXCEPTION", rendered)
+        self.assertIn("generated declarations", rendered)
+        self.assertIn("source availability and reproducible build instructions remain unresolved", rendered)
+        self.assertIn("not a legal determination", rendered)
+
+    def test_runtime_notice_table_covers_direct_qt_and_encrypted_mode_tool_dependencies(self) -> None:
+        module = _generator_module()
+        rendered = module.render_notices(ROOT)
+        self.assertIn("`qt6-imageformats`", rendered)
+        self.assertIn("`gocryptfs`", rendered)
+        self.assertIn("`libsecret`", rendered)
+        self.assertIn("`fuse3`", rendered)
+        self.assertIn("/usr/bin/gocryptfs", rendered)
+        self.assertIn("/usr/bin/secret-tool", rendered)
+        self.assertIn("/usr/bin/fusermount3", rendered)
+        self.assertIn("Provides the `secret-tool` executable", rendered)
+        self.assertIn("Provides the `fusermount3` helper", rendered)
+        self.assertIn("`ffmpeg>=2:9.0.2-2.3`", rendered)
+        self.assertIn("`gocryptfs=2.6.1.r20261022.ga8b36f0-1`", rendered)
+        self.assertIn("explicitly declared runtime dependencies", rendered)
+        self.assertIn("future FFmpeg versions are not pre-approved", rendered)
+        self.assertIn("Qt license choices are alternatives in package metadata; this inventory does not select one", rendered)
+        self.assertIn("Qt and FFmpeg are system-provided, not bundled in the app artifact", rendered)
+        self.assertIn("reviewed candidate FFmpeg package's `.PKGINFO` reports `GPL-3.0-or-later`", rendered)
+        self.assertIn("does not change the project's authorized `GPL-3.0-only` selection", rendered)
 
     def test_render_rejects_archive_above_compressed_size_limit(self) -> None:
         module = _generator_module()
