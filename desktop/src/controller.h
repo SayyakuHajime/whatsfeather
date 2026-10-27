@@ -71,8 +71,12 @@ class Controller : public QObject {
   Q_PROPERTY(bool historyWindow READ historyWindow NOTIFY messagesChanged)
   Q_PROPERTY(int messageCount READ messageCount NOTIFY messagesChanged)
 public:
+  using ProfileMountVerifier = std::function<bool(
+      const QString &ciphertextRoot, const QString &runtimeDir,
+      const QString &profileRoot, const QString &mountId, QString *error)>;
   explicit Controller(QObject *parent = nullptr,
-                      VoiceNoteRecorder::CaptureFactory voiceCaptureFactory = {});
+                      VoiceNoteRecorder::CaptureFactory voiceCaptureFactory = {},
+                      ProfileMountVerifier profileMountVerifier = {});
   ~Controller();
   JsonModel *chats() { return &m_chats; }
   JsonModel *messages() { return &m_messages; }
@@ -97,6 +101,7 @@ public:
   QStringList favoriteEmojis() const { return m_expressionStore.favoriteEmojis(); }
   QVariantList localStickerPacks() const { return m_expressionStore.stickerPacks(); }
   QString expressionStoreError() const { return m_expressionStoreError; }
+  bool encryptedProfileViewReady() const { return m_profileViewReady; }
   QVariantMap account() const { return m_account; }
   QVariantMap capabilities() const { return m_capabilities; }
   bool capabilitiesReady() const { return m_capabilitiesReady; }
@@ -243,6 +248,10 @@ private:
   void fetchMessages(bool reset);
   void finishPendingMediaReveal(int generation);
   void persistDraft();
+  bool applyEncryptedProfileView(const QVariantMap &view, QString *error);
+  void invalidateEncryptedProfileView(const QString &reason);
+  bool isActiveProfileMediaFile(const QString &path) const;
+  QVariant sanitizeProfileMediaUrls(const QVariant &value) const;
   void runFind();
   void sendAttachment();
   void sendAlbum();
@@ -281,14 +290,18 @@ private:
   quint64 m_next = 0;
   QByteArray m_buffer;
   QString m_id, m_title, m_initials, m_draft,
-      m_status = "Starting local backend…", m_connectionState = "starting", m_error, m_query, m_path, m_dataDir, m_qr;
+      m_status = "Starting local backend…", m_connectionState = "starting", m_error, m_query, m_path, m_dataDir, m_ciphertextRoot, m_qr;
+  QString m_storageViewId, m_profileMountId;
   QString m_pendingMediaChat, m_pendingMediaMessage;
   QString m_notice;
   bool m_syncPending = false;
   bool m_canQuit = false;
   bool m_demo = true, m_sending = false, m_hasMore = false, m_loading = false,
        m_history = false, m_statusPending = false, m_accountPending = false;
-  bool m_deferredExpressionLoad = false;
+  bool m_liveMode = false, m_profileViewReady = false;
+  quint64 m_backendGeneration = 0;
+  quint64 m_profileViewGeneration = 0, m_voiceCaptureViewGeneration = 0;
+  ProfileMountVerifier m_profileMountVerifier;
   QVariantMap m_account;
   QVariantMap m_capabilities, m_routeData;
   QString m_routeError, m_routeMethod, m_contactQuery, m_contactCursor,

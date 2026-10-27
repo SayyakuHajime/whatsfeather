@@ -2,20 +2,25 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 type profileSnapshot struct {
@@ -367,6 +372,107 @@ func TestSQLiteURIEncodingRoundTrip(t *testing.T) {
 	}
 }
 
+func TestHistorySQLiteTempStoreIsMemoryOnEveryConnection(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "history profile")
+	a, err := Open(dir, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	// App.Open normally pins its pool to one connection. Raise the test pool
+	// limit to prove that the policy belongs to the DSN, not one startup PRAGMA.
+	a.db.SetMaxOpenConns(2)
+	connections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		conn, connErr := a.db.Conn(context.Background())
+		if connErr != nil {
+			t.Fatal(connErr)
+		}
+		connections = append(connections, conn)
+	}
+	for i, conn := range connections {
+		var tempStore int
+		if err = conn.QueryRowContext(context.Background(), "PRAGMA temp_store").Scan(&tempStore); err != nil {
+			t.Fatal(err)
+		}
+		if tempStore != 2 {
+			t.Fatalf("history SQLite connection %d temp_store=%d, want MEMORY (2)", i, tempStore)
+		}
+	}
+
+	readOnly, err := sql.Open("sqlite", sqliteProfileURI(filepath.Join(dir, "history.db"), true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readOnly.Close()
+	readOnly.SetMaxOpenConns(2)
+	readOnlyConnections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range readOnlyConnections {
+			_ = conn.Close()
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		conn, connErr := readOnly.Conn(context.Background())
+		if connErr != nil {
+			t.Fatal(connErr)
+		}
+		readOnlyConnections = append(readOnlyConnections, conn)
+	}
+	for i, conn := range readOnlyConnections {
+		var tempStore int
+		if err = conn.QueryRowContext(context.Background(), "PRAGMA temp_store").Scan(&tempStore); err != nil {
+			t.Fatal(err)
+		}
+		if tempStore != 2 {
+			t.Fatalf("read-only inspection SQLite connection %d temp_store=%d, want MEMORY (2)", i, tempStore)
+		}
+	}
+}
+
+func TestRecoverySnapshotWorkspaceIsProfileBoundAndOwnerPrivate(t *testing.T) {
+	profileRoot := filepath.Join(t.TempDir(), "profile")
+	if err := os.Mkdir(profileRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := recoverySnapshotDirectory(profileRoot, filepath.Join(profileRoot, "history.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(workspace)
+	if filepath.Dir(workspace) != profileRoot {
+		t.Fatalf("workspace path %q is not directly inside profile root %q", workspace, profileRoot)
+	}
+	info, err := os.Lstat(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		t.Fatalf("recovery workspace metadata = %v, want owned mode-0700 directory", info.Mode())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		t.Fatalf("recovery workspace has unexpected owner metadata %T", info.Sys())
+	}
+	if _, err = recoverySnapshotDirectory(profileRoot, filepath.Join(filepath.Dir(profileRoot), "outside.db")); err == nil {
+		t.Fatal("workspace accepted a database path outside the bound profile root")
+	}
+
+	linkedRoot := filepath.Join(t.TempDir(), "profile-link")
+	if err = os.Symlink(profileRoot, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = recoverySnapshotDirectory(linkedRoot, filepath.Join(linkedRoot, "history.db")); err == nil {
+		t.Fatal("workspace accepted a symlinked profile path")
+	}
+}
+
 func TestHotJournalModeGuardRecoversCommittedView(t *testing.T) {
 	if os.Getenv("WHATSFEATHER_HOT_JOURNAL_CHILD") == "1" {
 		runHotJournalWriter(t)
@@ -438,8 +544,52 @@ func TestHotJournalModeGuardRecoversCommittedView(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err = Open(dir, false); err == nil || !strings.Contains(err.Error(), "profile mode mismatch") {
+	var snapshotTempStores []int64
+	var snapshotTempStoreMu sync.Mutex
+	sqlite.RegisterConnectionHook(func(conn sqlite.ExecQuerierContext, dsn string) error {
+		if !strings.Contains(dsn, "whatsfeather-recovery-") {
+			return nil
+		}
+		rows, queryErr := conn.QueryContext(context.Background(), "PRAGMA temp_store", nil)
+		if queryErr != nil {
+			return queryErr
+		}
+		values := make([]driver.Value, 1)
+		if queryErr = rows.Next(values); queryErr != nil {
+			_ = rows.Close()
+			return queryErr
+		}
+		if queryErr = rows.Close(); queryErr != nil {
+			return queryErr
+		}
+		value, ok := values[0].(int64)
+		if !ok {
+			return fmt.Errorf("unexpected PRAGMA temp_store result %T", values[0])
+		}
+		snapshotTempStoreMu.Lock()
+		snapshotTempStores = append(snapshotTempStores, value)
+		snapshotTempStoreMu.Unlock()
+		return nil
+	})
+
+	err = assertRecoverySnapshotStaysProtected(t, tmpRoot, dir, func() error {
+		_, openErr := Open(dir, false)
+		return openErr
+	})
+	if err == nil || !strings.Contains(err.Error(), "profile mode mismatch") {
 		t.Fatalf("wrong-mode hot-journal Open() error = %v, want profile mode mismatch", err)
+	}
+	assertNoRecoveryWorkspaceLeft(t, dir)
+	snapshotTempStoreMu.Lock()
+	observedSnapshotTempStores := append([]int64(nil), snapshotTempStores...)
+	snapshotTempStoreMu.Unlock()
+	if len(observedSnapshotTempStores) == 0 {
+		t.Error("hot-journal mode inspection did not open an observable recovery snapshot connection")
+	}
+	for i, tempStore := range observedSnapshotTempStores {
+		if tempStore != 2 {
+			t.Errorf("recovery inspection SQLite connection %d temp_store=%d, want MEMORY (2)", i, tempStore)
+		}
 	}
 	dbAfterWrong, err := os.ReadFile(dbPath)
 	if err != nil {
@@ -460,7 +610,11 @@ func TestHotJournalModeGuardRecoversCommittedView(t *testing.T) {
 		t.Fatalf("crash writer: %v", err)
 	}
 
-	a, err = Open(dir, true)
+	err = assertRecoverySnapshotStaysProtected(t, tmpRoot, dir, func() error {
+		var openErr error
+		a, openErr = Open(dir, true)
+		return openErr
+	})
 	if err != nil {
 		t.Fatalf("correct-mode hot-journal recovery: %v", err)
 	}
@@ -484,6 +638,7 @@ func TestHotJournalModeGuardRecoversCommittedView(t *testing.T) {
 	if err = a.Close(); err != nil {
 		t.Fatal(err)
 	}
+	assertNoRecoveryWorkspaceLeft(t, dir)
 	if _, err = os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rollback journal after correct recovery: stat error=%v", err)
 	}
@@ -494,6 +649,64 @@ func TestHotJournalModeGuardRecoversCommittedView(t *testing.T) {
 	if !reflect.DeepEqual(entriesAfter, entriesBefore) {
 		t.Fatalf("recovery snapshot temporary files were not cleaned: before=%v after=%v", entriesBefore, entriesAfter)
 	}
+}
+
+func assertNoRecoveryWorkspaceLeft(t *testing.T, profileRoot string) {
+	t.Helper()
+	entries, err := os.ReadDir(profileRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".whatsfeather-recovery-") {
+			t.Errorf("recovery inspection left protected snapshot workspace %q", entry.Name())
+		}
+	}
+}
+
+func assertRecoverySnapshotStaysProtected(t *testing.T, tmpRoot, profileRoot string, open func() error) error {
+	t.Helper()
+	externalFD, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
+	if err != nil {
+		t.Fatalf("watch external TMPDIR: %v", err)
+	}
+	defer syscall.Close(externalFD)
+	if _, err = syscall.InotifyAddWatch(externalFD, tmpRoot, syscall.IN_CREATE|syscall.IN_MOVED_TO); err != nil {
+		t.Fatalf("watch external TMPDIR entries: %v", err)
+	}
+	profileFD, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
+	if err != nil {
+		t.Fatalf("watch protected profile view: %v", err)
+	}
+	defer syscall.Close(profileFD)
+	if _, err = syscall.InotifyAddWatch(profileFD, profileRoot, syscall.IN_CREATE|syscall.IN_MOVED_TO); err != nil {
+		t.Fatalf("watch protected profile view entries: %v", err)
+	}
+	openErr := open()
+	readEvents := func(fd int) int {
+		buffer := make([]byte, 64*1024)
+		total := 0
+		for {
+			n, readErr := syscall.Read(fd, buffer)
+			if readErr == syscall.EAGAIN || readErr == syscall.EWOULDBLOCK {
+				break
+			}
+			if readErr != nil {
+				t.Fatalf("read profile recovery events: %v", readErr)
+			}
+			total += n
+		}
+		return total
+	}
+	externalEvents := readEvents(externalFD)
+	protectedEvents := readEvents(profileFD)
+	if externalEvents != 0 {
+		t.Errorf("recovery inspection created %d bytes of filesystem events in external TMPDIR %q", externalEvents, tmpRoot)
+	}
+	if protectedEvents == 0 {
+		t.Errorf("recovery inspection did not create its snapshot inside protected profile view %q", profileRoot)
+	}
+	return openErr
 }
 
 func runHotJournalWriter(t *testing.T) {

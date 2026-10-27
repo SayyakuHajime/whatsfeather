@@ -3,6 +3,11 @@
 #include <QFileInfo>
 
 bool Controller::recordRecentEmoji(const QString &emoji) {
+  if (m_liveMode && !m_profileViewReady) {
+    m_expressionStoreError = QStringLiteral("Encrypted profile storage is not ready; the emoji was not saved.");
+    emit expressionsChanged();
+    return false;
+  }
   QString error;
   const bool saved = m_expressionStore.recordRecentEmoji(emoji, &error);
   m_expressionStoreError = saved ? QString() : error;
@@ -11,6 +16,11 @@ bool Controller::recordRecentEmoji(const QString &emoji) {
 }
 
 bool Controller::toggleFavoriteEmoji(const QString &emoji) {
+  if (m_liveMode && !m_profileViewReady) {
+    m_expressionStoreError = QStringLiteral("Encrypted profile storage is not ready; the emoji was not saved.");
+    emit expressionsChanged();
+    return false;
+  }
   QString error;
   const bool saved = m_expressionStore.toggleFavoriteEmoji(emoji, &error);
   m_expressionStoreError = saved ? QString() : error;
@@ -19,6 +29,11 @@ bool Controller::toggleFavoriteEmoji(const QString &emoji) {
 }
 
 bool Controller::addCurrentStickerToPack(const QString &packName) {
+  if (m_liveMode && !m_profileViewReady) {
+    m_expressionStoreError = QStringLiteral("Encrypted profile storage is not ready; the sticker was not saved.");
+    emit expressionsChanged();
+    return false;
+  }
   const auto meta = m_attachment;
   if (meta.value(QStringLiteral("state")).toString() != QStringLiteral("ready") ||
       meta.value(QStringLiteral("kind")).toString() != QStringLiteral("sticker") ||
@@ -48,7 +63,7 @@ bool Controller::stageLocalSticker(const QString &packId,
                                    const QString &stickerId) {
   const auto features = m_capabilities.value(QStringLiteral("features")).toMap();
   const auto stickers = features.value(QStringLiteral("stickers")).toMap();
-  if (!connected() || m_id.isEmpty() || !m_capabilitiesReady ||
+  if ((m_liveMode && !m_profileViewReady) || !connected() || m_id.isEmpty() || !m_capabilitiesReady ||
       stickers.value(QStringLiteral("available")).toBool() != true ||
       !hasCapability(QStringLiteral("attachment.prepare"))) {
     m_expressionStoreError = QStringLiteral("Local sticker review is unavailable until a conversation and static-sticker support are ready.");

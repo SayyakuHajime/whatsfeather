@@ -3,7 +3,9 @@ package app
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -123,6 +126,38 @@ type CommunityGroupInfo struct {
 // Implementations must read the authenticated joined-groups snapshot only.
 type CommunityDirectory interface {
 	GetJoinedGroups(context.Context) ([]CommunityGroupInfo, error)
+}
+
+// CommunityInfo is the minimal projection for one explicitly scoped parent.
+// It intentionally has no participant fields.
+type CommunityInfo struct {
+	ID       string `json:"community_id"`
+	Title    string `json:"title"`
+	IsParent bool   `json:"is_parent"`
+}
+
+// CommunityInfoProvider is an optional target-only metadata capability.
+type CommunityInfoProvider interface {
+	GetCommunityInfo(context.Context, string) (CommunityInfo, error)
+}
+
+func isScopedLiveTestTransport(transport Transport) bool {
+	provider, ok := transport.(ScopedLiveTestProvider)
+	return ok && provider.ScopedLiveTest()
+}
+
+// ScopedCapabilityBlocker reports a static privacy-boundary reason that must
+// disable scoped capabilities until the transport can enforce them safely.
+type ScopedCapabilityBlocker interface {
+	ScopedCapabilityBlockReason() string
+}
+
+func scopedCapabilityBlockReason(transport Transport) string {
+	blocker, ok := transport.(ScopedCapabilityBlocker)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(blocker.ScopedCapabilityBlockReason())
 }
 
 type MessageActionTransport interface {
@@ -242,7 +277,9 @@ type App struct {
 	closed              bool
 	closeDone           chan struct{}
 	closeErr            error
+	transportCloseErr   error
 	dir                 string
+	storageView         map[string]any
 	gifMu               sync.Mutex
 	gifCache            map[string]gifResult
 	prepared            map[string]Attachment
@@ -251,8 +288,13 @@ type App struct {
 	notificationEvents  []notificationEvent
 }
 
-func sqliteFileURI(path string) string {
-	return (&url.URL{Scheme: "file", Path: path}).String()
+func sqliteProfileURI(path string, readOnly bool) string {
+	query := url.Values{}
+	query.Add("_pragma", "temp_store(MEMORY)")
+	if readOnly {
+		query.Set("mode", "ro")
+	}
+	return (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
 }
 
 // Keep the preflight copy bounded. This is an inspection budget, not a claim
@@ -365,7 +407,50 @@ func profileModeFromDB(db *sql.DB, expected string) error {
 	return nil
 }
 
-func inspectRecoverySnapshot(path, expected string) (result error) {
+func recoverySnapshotDirectory(profileDir, dbPath string) (string, error) {
+	if !filepath.IsAbs(profileDir) || filepath.Clean(profileDir) != profileDir ||
+		filepath.Clean(dbPath) != dbPath || filepath.Dir(dbPath) != profileDir || filepath.Base(dbPath) != "history.db" {
+		return "", fmt.Errorf("recovery snapshot path is not bound to the current profile view")
+	}
+	var rootInfo os.FileInfo
+	for current := profileDir; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil {
+			return "", fmt.Errorf("validate protected profile view for recovery inspection: %w", err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("unsafe symlink in protected profile view path")
+		}
+		if current == profileDir {
+			rootInfo = info
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	if !rootInfo.IsDir() {
+		return "", fmt.Errorf("protected profile view is not a directory")
+	}
+	stat, ok := rootInfo.Sys().(*syscall.Stat_t)
+	if !ok || int(stat.Uid) != os.Geteuid() {
+		return "", fmt.Errorf("protected profile view has a foreign owner")
+	}
+	tempDir, err := os.MkdirTemp(profileDir, ".whatsfeather-recovery-")
+	if err != nil {
+		return "", fmt.Errorf("create recovery inspection directory in protected profile view: %w", err)
+	}
+	if err = os.Chmod(tempDir, 0700); err != nil {
+		_ = os.RemoveAll(tempDir)
+		return "", fmt.Errorf("secure recovery inspection directory: %w", err)
+	}
+	return tempDir, nil
+}
+
+func inspectRecoverySnapshot(profileDir, path, expected string) (result error) {
+	if filepath.Clean(path) != filepath.Join(filepath.Clean(profileDir), "history.db") {
+		return fmt.Errorf("recovery snapshot path does not match profile database")
+	}
 	dbSource, err := regularProfileFile(path)
 	if err != nil {
 		return err
@@ -378,9 +463,9 @@ func inspectRecoverySnapshot(path, expected string) (result error) {
 		return fmt.Errorf("rollback-journal recovery inspection exceeds the %d MiB temporary snapshot budget", recoverySnapshotBudget>>20)
 	}
 
-	tempDir, err := os.MkdirTemp("", "whatsfeather-recovery-")
+	tempDir, err := recoverySnapshotDirectory(profileDir, path)
 	if err != nil {
-		return fmt.Errorf("create recovery inspection directory: %w", err)
+		return err
 	}
 	cleanup := func() error { return os.RemoveAll(tempDir) }
 	defer func() {
@@ -388,9 +473,6 @@ func inspectRecoverySnapshot(path, expected string) (result error) {
 			result = fmt.Errorf("clean recovery inspection: %w", cleanupErr)
 		}
 	}()
-	if err = os.Chmod(tempDir, 0700); err != nil {
-		return fmt.Errorf("secure recovery inspection directory: %w", err)
-	}
 	copyBudget := recoverySnapshotBudget
 	snapshotDB := filepath.Join(tempDir, "history.db")
 	if err = copyRecoveryFile(path, snapshotDB, &copyBudget); err != nil {
@@ -415,7 +497,7 @@ func inspectRecoverySnapshot(path, expected string) (result error) {
 		return fmt.Errorf("rollback journal changed while preparing recovery inspection")
 	}
 
-	snapshot, err := sql.Open("sqlite", sqliteFileURI(snapshotDB))
+	snapshot, err := sql.Open("sqlite", sqliteProfileURI(snapshotDB, false))
 	if err != nil {
 		return fmt.Errorf("open recovery inspection snapshot: %w", err)
 	}
@@ -431,7 +513,7 @@ func inspectRecoverySnapshot(path, expected string) (result error) {
 	return nil
 }
 
-func checkExistingProfileMode(path, expected string) error {
+func checkExistingProfileMode(profileDir, path, expected string) error {
 	needsInspection, err := rollbackJournalNeedsInspection(path)
 	if err != nil {
 		return err
@@ -440,12 +522,12 @@ func checkExistingProfileMode(path, expected string) error {
 		// Never let SQLite recover the original before the mode is known. The
 		// private rollback copy is discarded for both matching and mismatching
 		// modes; only a matching mode reaches Open's normal writable path.
-		return inspectRecoverySnapshot(path, expected)
+		return inspectRecoverySnapshot(profileDir, path, expected)
 	}
 
 	// Clean databases retain the direct read-only fast path. It is opened before
 	// any writable SQLite connection, migration, recovery, or PRAGMA can run.
-	ro, err := sql.Open("sqlite", sqliteFileURI(path)+"?mode=ro")
+	ro, err := sql.Open("sqlite", sqliteProfileURI(path, true))
 	if err != nil {
 		return fmt.Errorf("inspect profile mode: %w", err)
 	}
@@ -493,7 +575,7 @@ func Open(dir string, demo bool) (*App, error) {
 	if fileExists && fileInfo.Size() > 0 {
 		// Do this while the existing profile is still untouched. In particular,
 		// do not chmod the directory/database or let SQLite run migrations first.
-		if err := checkExistingProfileMode(path, mode); err != nil {
+		if err := checkExistingProfileMode(dir, path, mode); err != nil {
 			return nil, err
 		}
 	}
@@ -513,7 +595,7 @@ func Open(dir string, demo bool) (*App, error) {
 	if err = os.Chmod(path, 0600); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", sqliteFileURI(path))
+	db, err := sql.Open("sqlite", sqliteProfileURI(path, false))
 	if err != nil {
 		return nil, err
 	}
@@ -780,6 +862,57 @@ func Open(dir string, demo bool) (*App, error) {
 	}
 	return a, nil
 }
+
+// SetEncryptedStorageView records the vault-owned profile view created by the
+// daemon bootstrap. A plain app.Open is deliberately not enough to assert that
+// its data directory is encrypted.
+func (a *App) SetEncryptedStorageView(ciphertextRoot, runtimeDir, profileRoot string, mountID int) error {
+	if a == nil || mountID <= 0 {
+		return fmt.Errorf("encrypted profile view is incomplete")
+	}
+	for _, path := range []string{ciphertextRoot, runtimeDir, profileRoot} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+			return fmt.Errorf("encrypted profile view contains an unsafe path")
+		}
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+			return fmt.Errorf("encrypted profile view directory is unsafe")
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || int(stat.Uid) != os.Geteuid() {
+			return fmt.Errorf("encrypted profile view directory has a foreign owner")
+		}
+	}
+	if filepath.Dir(profileRoot) != runtimeDir ||
+		storagePathContains(ciphertextRoot, runtimeDir) ||
+		storagePathContains(runtimeDir, ciphertextRoot) {
+		return fmt.Errorf("encrypted profile view is not bound to the private runtime")
+	}
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return fmt.Errorf("create encrypted profile view identity")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if filepath.Clean(a.dir) != profileRoot {
+		return fmt.Errorf("encrypted profile view does not contain this app's storage directory")
+	}
+	if a.demo || a.closing || a.closed || a.storageView != nil {
+		return fmt.Errorf("encrypted profile view cannot be configured for this app")
+	}
+	a.storageView = map[string]any{
+		"version": 1, "mode": "encrypted", "ciphertext_root": ciphertextRoot,
+		"runtime_dir": runtimeDir, "profile_root": profileRoot,
+		"view_id": hex.EncodeToString(token[:]), "mount_id": fmt.Sprintf("%d", mountID),
+	}
+	return nil
+}
+
+func storagePathContains(parent, child string) bool {
+	relative, err := filepath.Rel(parent, child)
+	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
+}
+
 func (a *App) beginLifecycleLocked() {
 	if a.lifecycleDone == nil {
 		a.lifecycleDone = make(chan struct{})
@@ -813,10 +946,16 @@ func (a *App) transitionStateLocked(state string) {
 }
 
 func (a *App) runTeardown(transport Transport) {
+	var closeErr error
 	if transport != nil {
-		transport.Disconnect()
+		if closer, ok := transport.(interface{ DisconnectWithError() error }); ok {
+			closeErr = closer.DisconnectWithError()
+		} else {
+			transport.Disconnect()
+		}
 	}
 	a.mu.Lock()
+	a.transportCloseErr = closeErr
 	a.teardownActive = false
 	a.disconnectRequested = false
 	if !a.closing {
@@ -908,8 +1047,9 @@ func (a *App) Close() error {
 	if lifecycleDone != nil {
 		<-lifecycleDone
 	}
-	err := db.Close()
+	dbErr := db.Close()
 	a.mu.Lock()
+	err := errors.Join(a.transportCloseErr, dbErr)
 	a.closeErr = err
 	a.closed = true
 	close(a.closeDone)
@@ -1432,6 +1572,7 @@ func (a *App) syncHistory(ctx context.Context, raw json.RawMessage) (any, error)
 func (a *App) Handle(ctx context.Context, method string, raw json.RawMessage) (any, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	ctx = ensureMediaHydrationScope(ctx)
 	switch method {
 	case "notification.poll":
 		return a.pollNotifications(ctx, raw)
@@ -1580,6 +1721,8 @@ func (a *App) Handle(ctx context.Context, method string, raw json.RawMessage) (a
 		return a.messageContext(ctx, raw)
 	case "community.list":
 		return a.communityListLocked(ctx, raw)
+	case "community.info":
+		return a.communityInfoLocked(ctx, raw)
 	case "community.refresh":
 		return a.communityRefreshLocked(ctx, raw)
 	case "app.status":
@@ -1587,7 +1730,15 @@ func (a *App) Handle(ctx context.Context, method string, raw json.RawMessage) (a
 		if a.demo {
 			mode = "demo"
 		}
-		return map[string]any{"mode": mode, "state": a.state, "message": a.info, "qr_png": a.qr, "revision": a.revision}, nil
+		status := map[string]any{"mode": mode, "state": a.state, "message": a.info, "qr_png": a.qr, "revision": a.revision}
+		if a.storageView != nil {
+			view := make(map[string]any, len(a.storageView))
+			for key, value := range a.storageView {
+				view[key] = value
+			}
+			status["storage_view"] = view
+		}
+		return status, nil
 	case "chat.self":
 		if e := decode(raw, &struct{}{}); e != nil {
 			return nil, e

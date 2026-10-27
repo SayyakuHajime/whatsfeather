@@ -2,20 +2,149 @@
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QDesktopServices>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUuid>
 #include <utility>
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 constexpr qint64 MaxFrame = 256 * 1024;
 constexpr qint64 ReadChunk = 4096;
+
+bool cleanAbsolutePath(const QString &path) {
+  return !path.isEmpty() && path.startsWith(QLatin1Char('/')) &&
+         QDir::cleanPath(path) == path && !path.contains(QChar::Null);
+}
+
+bool pathHasNoSymlinkComponents(const QString &path) {
+  if (!cleanAbsolutePath(path))
+    return false;
+  QString current = QStringLiteral("/");
+  const auto parts = path.split(QLatin1Char('/'), Qt::SkipEmptyParts);
+  for (const auto &part : parts) {
+    current = QDir(current).filePath(part);
+    struct stat info {};
+    const auto encoded = QFile::encodeName(current);
+    if (::lstat(encoded.constData(), &info) != 0 || S_ISLNK(info.st_mode) ||
+        !S_ISDIR(info.st_mode))
+      return false;
+  }
+  return true;
+}
+
+bool privateOwnedDirectory(const QString &path) {
+  struct stat info {};
+  const auto encoded = QFile::encodeName(path);
+  return ::lstat(encoded.constData(), &info) == 0 && S_ISDIR(info.st_mode) &&
+         !S_ISLNK(info.st_mode) && info.st_uid == ::geteuid() &&
+         (info.st_mode & 0077) == 0;
+}
+
+bool pathIsWithin(const QString &root, const QString &path) {
+  const auto relative = QDir(root).relativeFilePath(path);
+  return relative != QStringLiteral(".") && relative != QStringLiteral("..") &&
+         !relative.startsWith(QStringLiteral("..") + QDir::separator());
+}
+
+QString decodeMountInfoPath(QString field) {
+  field.replace(QStringLiteral("\\040"), QStringLiteral(" "));
+  field.replace(QStringLiteral("\\011"), QStringLiteral("\t"));
+  field.replace(QStringLiteral("\\012"), QStringLiteral("\n"));
+  field.replace(QStringLiteral("\\134"), QStringLiteral("\\"));
+  return field;
+}
+
+bool verifyOwnedGocryptfsMount(const QString &ciphertextRoot,
+                               const QString &runtimeDir,
+                               const QString &profileRoot,
+                               const QString &mountId, QString *error) {
+  const auto expectedSource = QDir(ciphertextRoot).filePath(QStringLiteral("cipher"));
+  if (!cleanAbsolutePath(ciphertextRoot) || !cleanAbsolutePath(runtimeDir) ||
+      !cleanAbsolutePath(profileRoot) ||
+      QFileInfo(profileRoot).absolutePath() != runtimeDir ||
+      QFileInfo(expectedSource).canonicalFilePath() != expectedSource) {
+    if (error)
+      *error = QStringLiteral("The encrypted mount is not bound to the expected profile paths.");
+    return false;
+  }
+
+  QFile mountInfo(QStringLiteral("/proc/self/mountinfo"));
+  if (!mountInfo.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (error)
+      *error = QStringLiteral("The system mount table is unavailable.");
+    return false;
+  }
+  while (true) {
+    const auto line = mountInfo.readLine();
+    if (line.isEmpty())
+      break;
+    const auto fields = QString::fromLocal8Bit(line)
+                            .trimmed().split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const auto separator = fields.indexOf(QStringLiteral("-"));
+    if (separator < 6 || fields.size() <= separator + 3 || fields.size() < 6)
+      continue;
+    const auto id = fields.at(0);
+    const auto mountPath = decodeMountInfoPath(fields.at(4));
+    const auto source = decodeMountInfoPath(fields.at(separator + 2));
+    const auto mountOptions = fields.at(5).split(QLatin1Char(','), Qt::SkipEmptyParts);
+    const auto superOptions = fields.at(separator + 3).split(QLatin1Char(','), Qt::SkipEmptyParts);
+    const auto filesystem = fields.at(separator + 1);
+    if (id != mountId || mountPath != profileRoot ||
+        filesystem != QStringLiteral("fuse.gocryptfs") ||
+        source != expectedSource)
+      continue;
+
+    bool foundUserId = false;
+    bool validUserId = false;
+    bool allowOther = false;
+    for (const auto &option : mountOptions + superOptions) {
+      if (option == QStringLiteral("allow_other"))
+        allowOther = true;
+      if (option.startsWith(QStringLiteral("user_id="))) {
+        if (foundUserId) {
+          foundUserId = false;
+          validUserId = false;
+          break;
+        }
+        foundUserId = true;
+        bool ok = false;
+        const auto uid = option.mid(QStringLiteral("user_id=").size()).toULongLong(&ok, 10);
+        validUserId = ok && uid == static_cast<qulonglong>(::geteuid());
+      }
+    }
+    const bool secureMountFlags = mountOptions.contains(QStringLiteral("nosuid")) &&
+                                  mountOptions.contains(QStringLiteral("nodev")) &&
+                                  mountOptions.contains(QStringLiteral("noexec")) &&
+                                  !mountOptions.contains(QStringLiteral("suid")) &&
+                                  !mountOptions.contains(QStringLiteral("dev")) &&
+                                  !mountOptions.contains(QStringLiteral("exec"));
+    if (foundUserId && validUserId && !allowOther && secureMountFlags)
+      return true;
+  }
+  if (error)
+    *error = QStringLiteral("The reported profile path is not the daemon-owned gocryptfs mount.");
+  return false;
+}
+
+bool validHexIdentity(const QString &value) {
+  static const QRegularExpression expression(QStringLiteral("^[0-9a-f]{32}$"));
+  return expression.match(value).hasMatch();
+}
+
+bool validMountIdentity(const QString &value) {
+  bool ok = false;
+  const auto id = value.toULongLong(&ok, 10);
+  return ok && id > 0 && QString::number(id) == value;
+}
 
 QString capabilityFeatureId(const QString &method) {
   if (method == "attachment.album.prepare" ||
@@ -77,8 +206,13 @@ QString capabilityFeatureId(const QString &method) {
 } // namespace
 
 Controller::Controller(QObject *p,
-                       VoiceNoteRecorder::CaptureFactory voiceCaptureFactory)
-    : QObject(p), m_voiceRecorder(std::move(voiceCaptureFactory)) {
+                       VoiceNoteRecorder::CaptureFactory voiceCaptureFactory,
+                       ProfileMountVerifier profileMountVerifier)
+    : QObject(p),
+      m_profileMountVerifier(profileMountVerifier
+                                  ? std::move(profileMountVerifier)
+                                  : ProfileMountVerifier(verifyOwnedGocryptfsMount)),
+      m_voiceRecorder(std::move(voiceCaptureFactory)) {
   m_socket.setReadBufferSize(MaxFrame);
   m_findTimer.setInterval(180);
   m_findTimer.setSingleShot(true);
@@ -99,27 +233,24 @@ Controller::Controller(QObject *p,
       m_socket.connectToServer(m_path);
   });
   connect(&m_socket, &QLocalSocket::connected, this, [this] {
+    ++m_backendGeneration;
     m_retry.stop();
     m_retries = 0;
     m_revision = -1;
     m_accountRevision = -2;
-    if (m_deferredExpressionLoad) {
-      m_deferredExpressionLoad = false;
-      QString expressionError;
-      m_expressionStoreError.clear();
-      if (!m_expressionStore.load(&expressionError))
-        m_expressionStoreError = expressionError;
-      emit expressionsChanged();
-    }
+    m_statusPending = false;
     m_poll.start();
     refreshCapabilities();
     statusPoll();
   });
   connect(&m_socket, &QLocalSocket::readyRead, this, &Controller::read);
   connect(&m_socket, &QLocalSocket::disconnected, this, [this] {
+    ++m_backendGeneration;
     m_buffer.clear();
     m_poll.stop();
     m_statusPending = false;
+    if (m_liveMode)
+      invalidateEncryptedProfileView(QStringLiteral("The encrypted profile view is unavailable while the backend is disconnected."));
     m_status = "Local backend disconnected";
     m_connectionState = "disconnected";
     m_accountRevision = -2;
@@ -127,14 +258,20 @@ Controller::Controller(QObject *p,
     m_capabilityMethods.clear();
     m_capabilitiesReady = false;
     m_capabilitiesPending = false;
-    m_contacts.replace({});
+    const bool contactsStateChanged = m_contacts.rowCount() > 0 || m_contactsLoading ||
+                                      m_contactsHasMore || !m_contactsError.isEmpty() ||
+                                      !m_contactCursor.isEmpty() || !m_contactQuery.isEmpty();
+    if (m_contacts.rowCount() > 0)
+      m_contacts.replace({});
     ++m_contactSerial;
     m_contactTimer.stop();
     m_contactCursor.clear();
+    m_contactQuery.clear();
     m_contactsHasMore = false;
     m_contactsLoading = false;
     m_contactsError.clear();
-    emit contactsChanged();
+    if (contactsStateChanged)
+      emit contactsChanged();
     emit capabilitiesChanged();
     auto pending = std::move(m_pending);
     m_pending.clear();
@@ -248,11 +385,15 @@ Controller::Controller(QObject *p,
           [this] { emit stateChanged(); });
   connect(&m_voiceRecorder, &VoiceNoteRecorder::failed, this,
           [this](const QString &message) {
+            if (m_voiceCaptureViewGeneration != m_profileViewGeneration)
+              return;
             m_error = message;
             emit stateChanged();
           });
   connect(&m_voiceRecorder, &VoiceNoteRecorder::ready, this,
           [this](const QString &path) {
+            if (m_voiceCaptureViewGeneration != m_profileViewGeneration)
+              return;
             if (m_id.isEmpty() || !connected() || !m_attachment.isEmpty() ||
                 m_voiceStagePending) {
               m_error = "Voice note could not be staged for the current conversation.";
@@ -281,12 +422,18 @@ Controller::~Controller() {
   m_timeout.stop();
   m_draftTimer.stop();
   persistDraft();
+  m_profileViewReady = false;
+  m_dataDir.clear();
+  m_storageViewId.clear();
+  m_profileMountId.clear();
+  m_expressionStore.setProfileRoot(QString());
   m_socket.flush();
   m_socket.disconnect(this);
   m_socket.abort();
   if (m_process.state() != QProcess::NotRunning) {
     m_process.terminate();
-    if (!m_process.waitForFinished(2500)) {
+    if (!m_process.waitForFinished(22000)) {
+      qWarning() << "Local backend did not finish encrypted-profile teardown within its close budget; terminating forcefully. Recovery may be required.";
       m_process.kill();
       m_process.waitForFinished(1000);
     }
@@ -294,6 +441,11 @@ Controller::~Controller() {
 }
 void Controller::start(const QString &socket, const QString &dataDir,
                        bool live, const QString &liveTestScopePath) {
+  ++m_backendGeneration;
+  m_statusPending = false;
+  m_poll.stop();
+  if (m_liveMode)
+    invalidateEncryptedProfileView(QStringLiteral("The encrypted profile view is being restarted."));
   if (!liveTestScopePath.isEmpty() && (!live || !socket.isEmpty())) {
     m_error = "Live-test scope requires live mode and the managed local backend.";
     emit stateChanged();
@@ -307,17 +459,27 @@ void Controller::start(const QString &socket, const QString &dataDir,
       return;
     }
   }
-  m_expressionStore.setProfileRoot(dataDir);
-  m_dataDir = QFileInfo(dataDir).absoluteFilePath();
+  m_liveMode = live;
+  m_demo = !live;
+  m_ciphertextRoot = QDir::cleanPath(QFileInfo(dataDir).absoluteFilePath());
+  m_storageViewId.clear();
+  m_profileMountId.clear();
   m_expressionStoreError.clear();
-  m_deferredExpressionLoad = !liveTestScopePath.isEmpty();
-  if (!m_deferredExpressionLoad) {
+  if (live) {
+    m_profileViewReady = false;
+    m_dataDir.clear();
+    m_expressionStore.setProfileRoot(QString());
+    m_expressionStoreError = QStringLiteral("Waiting for the encrypted profile view.");
+    emit expressionsChanged();
+  } else {
+    m_profileViewReady = true;
+    m_dataDir = m_ciphertextRoot;
+    m_expressionStore.setProfileRoot(m_dataDir);
     QString expressionError;
     if (!m_expressionStore.load(&expressionError))
       m_expressionStoreError = expressionError;
     emit expressionsChanged();
   }
-  m_demo = !live;
   if (!socket.isEmpty()) {
     m_path = socket;
   } else {
@@ -348,19 +510,266 @@ void Controller::start(const QString &socket, const QString &dataDir,
   m_retry.start();
   emit stateChanged();
 }
+bool Controller::applyEncryptedProfileView(const QVariantMap &view,
+                                           QString *error) {
+  const auto reject = [error](const QString &message) {
+    if (error)
+      *error = message;
+    return false;
+  };
+  if (!m_liveMode || view.value(QStringLiteral("version")).toInt() != 1 ||
+      view.value(QStringLiteral("mode")).toString() != QStringLiteral("encrypted"))
+    return reject(QStringLiteral("The backend did not confirm an encrypted profile view."));
+
+  const auto ciphertextRoot = view.value(QStringLiteral("ciphertext_root")).toString();
+  const auto runtimeDir = view.value(QStringLiteral("runtime_dir")).toString();
+  const auto profileRoot = view.value(QStringLiteral("profile_root")).toString();
+  const auto viewId = view.value(QStringLiteral("view_id")).toString();
+  const auto mountId = view.value(QStringLiteral("mount_id")).toString();
+  const auto expectedRuntime = QDir::cleanPath(QFileInfo(m_path).absolutePath());
+  const auto relativeMount = QDir(expectedRuntime).relativeFilePath(profileRoot);
+  if (!cleanAbsolutePath(m_ciphertextRoot) || ciphertextRoot != m_ciphertextRoot ||
+      runtimeDir != expectedRuntime || !cleanAbsolutePath(runtimeDir) ||
+      !cleanAbsolutePath(profileRoot) || QFileInfo(profileRoot).absolutePath() != runtimeDir ||
+      relativeMount.isEmpty() || relativeMount == QStringLiteral(".") ||
+      relativeMount.contains(QDir::separator()) || relativeMount.startsWith(QStringLiteral("..")) ||
+      ciphertextRoot == runtimeDir ||
+      pathIsWithin(ciphertextRoot, runtimeDir) || pathIsWithin(runtimeDir, ciphertextRoot) ||
+      !validHexIdentity(viewId) || !validMountIdentity(mountId))
+    return reject(QStringLiteral("The encrypted profile view is not bound to this launch root and runtime."));
+
+  for (const auto &path : {ciphertextRoot, runtimeDir, profileRoot}) {
+    const QFileInfo info(path);
+    if (!pathHasNoSymlinkComponents(path) || info.canonicalFilePath() != path ||
+        !privateOwnedDirectory(path))
+      return reject(QStringLiteral("The encrypted profile view contains an unsafe directory."));
+  }
+  QString mountError;
+  if (!m_profileMountVerifier(ciphertextRoot, runtimeDir, profileRoot,
+                               mountId, &mountError))
+    return reject(mountError.isEmpty()
+                      ? QStringLiteral("The encrypted profile mount could not be verified.")
+                      : mountError);
+
+  if (m_profileViewReady && m_storageViewId == viewId &&
+      m_profileMountId == mountId && m_dataDir == profileRoot)
+    return true;
+
+  invalidateEncryptedProfileView(QStringLiteral("The encrypted profile mount changed; local expression state was reloaded."));
+  m_dataDir = profileRoot;
+  m_expressionStore.setProfileRoot(m_dataDir);
+  QString expressionError;
+  m_expressionStoreError.clear();
+  if (!m_expressionStore.load(&expressionError))
+    m_expressionStoreError = expressionError;
+  m_storageViewId = viewId;
+  m_profileMountId = mountId;
+  m_profileViewReady = true;
+  if (error)
+    error->clear();
+  emit expressionsChanged();
+  emit capabilitiesChanged();
+  return true;
+}
+
+void Controller::invalidateEncryptedProfileView(const QString &reason) {
+  const bool recorderState = m_voiceRecorder.recording() ||
+                             m_voiceRecorder.encoding() ||
+                             m_voiceRecorder.elapsedSeconds() > 0 ||
+                             !m_voiceRecorder.error().isEmpty() ||
+                             m_voiceStagePending || m_voiceDiscardPending ||
+                             m_voiceAttachmentSerial >= 0 ||
+                             m_attachment.value("kind").toString() ==
+                                 QStringLiteral("voice-note");
+  const bool changed = m_profileViewReady || !m_dataDir.isEmpty() ||
+                       !m_storageViewId.isEmpty() || !m_profileMountId.isEmpty() ||
+                       m_chats.rowCount() > 0 || m_messages.rowCount() > 0 ||
+                       m_searchResults.rowCount() > 0 || m_contacts.rowCount() > 0 ||
+                       !m_account.isEmpty() || m_accountPending ||
+                       !m_id.isEmpty() || !m_title.isEmpty() || !m_initials.isEmpty() ||
+                       !m_draft.isEmpty() || m_draftTimer.isActive() ||
+                       !m_query.isEmpty() || !m_findQuery.isEmpty() || m_searching ||
+                       !m_attachment.isEmpty() || !m_attachmentPath.isEmpty() ||
+                       !m_attachmentOriginalPath.isEmpty() || !m_attachmentSendId.isEmpty() ||
+                       !m_albumPreparedPaths.isEmpty() || m_attachmentMode != QStringLiteral("photo") ||
+                       !m_contactPath.isEmpty() || !m_contactCards.isEmpty() ||
+                       !m_contactSendId.isEmpty() || !m_contactShareError.isEmpty() ||
+                       m_contactPreparing || m_contactSending || m_contactOutcomeUnknown ||
+                       !m_contactQuery.isEmpty() || !m_contactCursor.isEmpty() ||
+                       m_contactsLoading || m_contactsHasMore || !m_contactsError.isEmpty() ||
+                       !m_locationSendId.isEmpty() || !m_locationShareError.isEmpty() ||
+                       m_locationSending || m_locationOutcomeUnknown || m_locationShareAccepted ||
+                       !m_gifItems.isEmpty() || !m_gifError.isEmpty() ||
+                       !m_gifProvider.isEmpty() || m_gifsLoading ||
+                       !m_routeData.isEmpty() || !m_routeError.isEmpty() ||
+                       !m_routeMethod.isEmpty() || m_routeLoading ||
+                       !m_expressionStore.recentEmojis().isEmpty() ||
+                       !m_expressionStore.favoriteEmojis().isEmpty() ||
+                       !m_expressionStore.stickerPacks().isEmpty() ||
+                       m_expressionStoreError != reason ||
+                       !m_pendingMediaChat.isEmpty() || !m_pendingMediaMessage.isEmpty() ||
+                       m_syncPending || m_sending || m_hasMore || m_loading || m_history ||
+                       !m_pollVoteLocks.isEmpty() || !m_listReplyLocks.isEmpty() ||
+                       !m_buttonReplyLocks.isEmpty() || !m_mediaBusy.isEmpty() ||
+                       !m_mediaErrors.isEmpty() || !m_notificationCursor.isEmpty() ||
+                       m_notificationPending || !m_qr.isEmpty() ||
+                       (!m_error.isEmpty() && m_error != reason) ||
+                       !m_notice.isEmpty() || m_communitiesRefreshing || recorderState ||
+                       (m_liveMode && m_status !=
+                                           QStringLiteral("Encrypted profile view unavailable."));
+
+  // Make every callback from the old view stale before timers, models, or
+  // re-entrant Qt signal handlers can start more profile work.
+  ++m_profileViewGeneration;
+  m_profileViewReady = false;
+  ++m_generation;
+  ++m_attachmentSerial;
+  ++m_contactFileSerial;
+  ++m_contactSerial;
+  ++m_routeSerial;
+  ++m_gifSerial;
+  ++m_notificationSerial;
+  ++m_draftVersion;
+  m_draftTimer.stop();
+  m_searchTimer.stop();
+  m_findTimer.stop();
+  m_contactTimer.stop();
+
+  m_id.clear();
+  m_title.clear();
+  m_initials.clear();
+  m_draft.clear();
+  m_query.clear();
+  m_findQuery.clear();
+  m_searching = false;
+  m_attachment.clear();
+  m_attachmentPath.clear();
+  m_attachmentOriginalPath.clear();
+  m_attachmentMode = QStringLiteral("photo");
+  m_attachmentSendId.clear();
+  m_albumPreparedPaths.clear();
+  m_contactPath.clear();
+  m_contactCards.clear();
+  m_contactSendId.clear();
+  m_contactShareError.clear();
+  m_contactPreparing = false;
+  m_contactSending = false;
+  m_contactOutcomeUnknown = false;
+  m_contactQuery.clear();
+  m_contactCursor.clear();
+  m_contactsLoading = false;
+  m_contactsHasMore = false;
+  m_contactsError.clear();
+  m_locationSendId.clear();
+  m_locationShareError.clear();
+  m_locationSending = false;
+  m_locationOutcomeUnknown = false;
+  m_locationShareAccepted = false;
+  m_gifItems.clear();
+  m_gifError.clear();
+  m_gifProvider.clear();
+  m_gifsLoading = false;
+  m_routeData.clear();
+  m_routeError.clear();
+  m_routeMethod.clear();
+  m_routeLoading = false;
+  m_pendingMediaChat.clear();
+  m_pendingMediaMessage.clear();
+  m_syncPending = false;
+  m_sending = false;
+  m_hasMore = false;
+  m_loading = false;
+  m_history = false;
+  m_account.clear();
+  m_accountPending = false;
+  m_accountRevision = -2;
+  m_revision = -1;
+  m_pollVoteLocks.clear();
+  m_listReplyLocks.clear();
+  m_buttonReplyLocks.clear();
+  m_mediaBusy.clear();
+  m_mediaErrors.clear();
+  m_notificationCursor.clear();
+  m_notificationPending = false;
+  m_qr.clear();
+  if (m_error != reason)
+    m_error.clear();
+  m_notice.clear();
+  if (m_liveMode)
+    m_status = QStringLiteral("Encrypted profile view unavailable.");
+  m_communitiesRefreshing = false;
+  m_draftVersion = 0;
+  m_voiceStagePending = false;
+  m_voiceDiscardPending = false;
+  m_voiceAttachmentSerial = -1;
+  m_dataDir.clear();
+  m_storageViewId.clear();
+  m_profileMountId.clear();
+  m_expressionStore.setProfileRoot(QString());
+  m_expressionStoreError = reason;
+
+  if (m_chats.rowCount() > 0)
+    m_chats.replace({});
+  if (m_messages.rowCount() > 0)
+    m_messages.replace({});
+  if (m_searchResults.rowCount() > 0)
+    m_searchResults.replace({});
+  if (m_contacts.rowCount() > 0)
+    m_contacts.replace({});
+  if (recorderState)
+    m_voiceRecorder.cancel();
+
+  if (changed) {
+    emit selectionChanged();
+    emit draftChanged();
+    emit stateChanged();
+    emit pollVotesChanged();
+    emit listRepliesChanged();
+    emit buttonRepliesChanged();
+    emit messagesChanged();
+    emit findChanged();
+    emit attachmentChanged();
+    emit contactShareChanged();
+    emit locationShareChanged();
+    emit gifsChanged();
+    emit expressionsChanged();
+    emit accountChanged();
+    emit contactsChanged();
+    emit routeChanged();
+    emit capabilitiesChanged();
+  }
+}
 void Controller::request(const QString &method, const QJsonObject &params,
                          Callback cb) {
+  static const QSet<QString> storageHandshakeMethods{
+      QStringLiteral("app.status"), QStringLiteral("app.capabilities"),
+      QStringLiteral("auth.disconnect")};
+  const bool profileBound = m_liveMode && !storageHandshakeMethods.contains(method);
+  const quint64 viewGeneration = m_profileViewGeneration;
+  auto guardedCallback = [this, profileBound, viewGeneration,
+                          callback = std::move(cb)](QJsonValue value,
+                                                    QJsonObject error) mutable {
+    if (profileBound && viewGeneration != m_profileViewGeneration)
+      return;
+    callback(std::move(value), std::move(error));
+  };
   if (!connected()) {
-    cb({}, {{"code", "disconnected"},
-            {"message", "Local backend is not connected"}});
+    guardedCallback({}, {{"code", "disconnected"},
+                         {"message", "Local backend is not connected"}});
+    return;
+  }
+  if (m_liveMode && !m_profileViewReady &&
+      !storageHandshakeMethods.contains(method)) {
+    guardedCallback({}, {{"code", "storage_view_unavailable"},
+                         {"message", "The encrypted profile view is not ready for profile operations."}});
     return;
   }
   if (m_pending.size() >= 32) {
-    cb({}, {{"code", "busy"}, {"message", "Too many pending operations"}});
+    guardedCallback({}, {{"code", "busy"}, {"message", "Too many pending operations"}});
     return;
   }
   auto id = QString::number(++m_next);
-  m_pending.insert(id, {std::move(cb), QDateTime::currentMSecsSinceEpoch()});
+  m_pending.insert(id, {std::move(guardedCallback), QDateTime::currentMSecsSinceEpoch()});
   auto data = QJsonDocument(QJsonObject{{"v", 1},
                                         {"id", id},
                                         {"method", method},
@@ -419,38 +828,65 @@ void Controller::statusPoll() {
   if (m_statusPending)
     return;
   m_statusPending = true;
-  request("app.status", {}, [this](QJsonValue value, QJsonObject e) {
+  const auto backendGeneration = m_backendGeneration;
+  request("app.status", {}, [this, backendGeneration](QJsonValue value, QJsonObject e) {
+    if (backendGeneration != m_backendGeneration)
+      return;
     m_statusPending = false;
     if (!e.isEmpty()) {
+      if (m_liveMode)
+        invalidateEncryptedProfileView(QStringLiteral("Encrypted profile status could not be verified."));
       m_error = e.value("message").toString();
       emit stateChanged();
       return;
     }
     auto o = value.toObject();
     const auto previousConnectionState = m_connectionState;
-    m_demo = o.value("mode").toString() == "demo";
+    const auto backendMode = o.value("mode").toString();
+    m_demo = !m_liveMode;
+    if (m_liveMode) {
+      QString viewError;
+      if (backendMode != QStringLiteral("live") ||
+          !applyEncryptedProfileView(o.value("storage_view").toObject().toVariantMap(),
+                                    &viewError)) {
+        if (viewError.isEmpty())
+          viewError = QStringLiteral("The backend did not confirm an encrypted profile view.");
+        invalidateEncryptedProfileView(viewError);
+        m_error = viewError;
+      } else if (m_error.startsWith(QStringLiteral("The backend did not confirm")) ||
+                 m_error.startsWith(QStringLiteral("The encrypted profile view"))) {
+        m_error.clear();
+      }
+    }
     m_connectionState = o.value("state").toString();
     if (m_connectionState.isEmpty())
       m_connectionState = m_demo ? "demo" : "unknown";
-    m_status = o.value("message").toString();
-    m_qr = o.value("qr_png").toString();
+    m_status = m_liveMode && !m_profileViewReady
+                   ? QStringLiteral("Encrypted profile view unavailable.")
+                   : o.value("message").toString();
+    m_qr = (!m_liveMode || m_profileViewReady)
+               ? o.value("qr_png").toString()
+               : QString();
     const auto statusAccount = o.value("account").toObject().toVariantMap();
     if (previousConnectionState != m_connectionState)
       m_accountRevision = -2;
-    auto rev = o.value("revision").toDouble();
-    if (rev != m_revision) {
-      m_revision = rev;
+    const auto revision = o.value("revision").toDouble();
+    if ((!m_liveMode || m_profileViewReady) && revision != m_revision) {
+      m_revision = revision;
       refreshChats();
       if (!m_id.isEmpty() && !m_history)
         fetchMessages(false);
       refreshAccount(statusAccount);
-    } else if (!statusAccount.isEmpty() && statusAccount != m_account) {
+    } else if ((!m_liveMode || m_profileViewReady) &&
+               !statusAccount.isEmpty() && statusAccount != m_account) {
       m_account = statusAccount;
       emit accountChanged();
-    } else if (m_account.isEmpty() || m_accountRevision != m_revision) {
+    } else if ((!m_liveMode || m_profileViewReady) &&
+               (m_account.isEmpty() || m_accountRevision != m_revision)) {
       refreshAccount();
     }
-    pollNotifications();
+    if (!m_liveMode || m_profileViewReady)
+      pollNotifications();
     emit stateChanged();
   });
 }
@@ -514,6 +950,8 @@ void Controller::refreshCapabilities() {
   });
 }
 bool Controller::hasCapability(const QString &method) const {
+  if (m_liveMode && !m_profileViewReady)
+    return false;
   if (!m_capabilitiesReady || !m_capabilityMethods.contains(method))
     return false;
   const auto featureId = capabilityFeatureId(method);
@@ -524,6 +962,8 @@ bool Controller::hasCapability(const QString &method) const {
   return feature.value("available").toBool();
 }
 QString Controller::capabilityReason(const QString &method) const {
+  if (m_liveMode && !m_profileViewReady)
+    return QStringLiteral("The encrypted profile view is not ready.");
   if (!m_capabilitiesReady)
     return QStringLiteral("Checking backend support.");
   const auto feature = m_capabilities.value("features").toMap()
@@ -547,15 +987,22 @@ void Controller::refreshChats() {
               emit stateChanged();
               return;
             }
-            m_chats.replace(
-                value.toObject().value("chats").toArray().toVariantList());
+            m_chats.replace(sanitizeProfileMediaUrls(
+                value.toObject().value("chats").toArray().toVariantList()).toList());
           });
 }
 void Controller::search(const QString &q) {
+  if (m_liveMode && !m_profileViewReady) {
+    m_searchTimer.stop();
+    m_query.clear();
+    return;
+  }
   m_query = q;
   m_searchTimer.start();
 }
 void Controller::selectChat(const QString &id) {
+  if (m_liveMode && !m_profileViewReady)
+    return;
   if (id == m_id || m_contactSending || m_locationSending ||
       (m_sending && m_attachment.value("kind").toString() ==
                         QStringLiteral("album")))
@@ -608,7 +1055,7 @@ void Controller::selectChat(const QString &id) {
   emit listRepliesChanged();
   emit draftChanged();
   emit messagesChanged();
-  if (id.isEmpty())
+  if (id.isEmpty() || (m_liveMode && !m_profileViewReady))
     return;
   int gen = m_generation;
   int version = m_draftVersion;
@@ -627,6 +1074,8 @@ void Controller::selectChat(const QString &id) {
   fetchMessages(true);
 }
 void Controller::setDraft(const QString &t) {
+  if (m_liveMode && !m_profileViewReady)
+    return;
   if (t == m_draft)
     return;
   m_draft = t;
@@ -635,7 +1084,7 @@ void Controller::setDraft(const QString &t) {
   emit draftChanged();
 }
 void Controller::persistDraft() {
-  if (m_id.isEmpty() || !connected())
+  if (m_id.isEmpty() || !connected() || (m_liveMode && !m_profileViewReady))
     return;
   const auto id = m_id, text = m_draft;
   request("draft.set", {{"chat_id", id}, {"text", text}},
@@ -648,7 +1097,7 @@ void Controller::persistDraft() {
           });
 }
 void Controller::fetchMessages(bool reset) {
-  if (m_id.isEmpty() || m_loading)
+  if (m_id.isEmpty() || m_loading || (m_liveMode && !m_profileViewReady))
     return;
   m_loading = true;
   emit messagesChanged();
@@ -669,7 +1118,8 @@ void Controller::fetchMessages(bool reset) {
               return;
             }
             auto o = value.toObject();
-            auto list = o.value("messages").toArray().toVariantList();
+            auto list = sanitizeProfileMediaUrls(
+                o.value("messages").toArray().toVariantList()).toList();
             if (reset)
               m_messages.replace(list);
             else
@@ -718,7 +1168,8 @@ void Controller::loadOlder() {
               return;
             }
             auto o = value.toObject();
-            m_messages.prepend(o.value("messages").toArray().toVariantList());
+            m_messages.prepend(sanitizeProfileMediaUrls(
+                o.value("messages").toArray().toVariantList()).toList());
             m_hasMore = o.value("has_more").toBool();
             m_history = true;
             emit messagesChanged();
@@ -732,10 +1183,12 @@ void Controller::latest() {
   emit messagesChanged();
 }
 bool Controller::startVoiceNoteRecording() {
-  if (!connected() || m_id.isEmpty() || m_sending || !m_attachment.isEmpty() ||
+  if (!connected() || (m_liveMode && !m_profileViewReady) || m_id.isEmpty() ||
+      m_sending || !m_attachment.isEmpty() ||
       !m_draft.isEmpty() || m_voiceStagePending || m_voiceRecorder.recording() ||
       m_voiceRecorder.encoding())
     return false;
+  m_voiceCaptureViewGeneration = m_profileViewGeneration;
   m_error.clear();
   const bool started = m_voiceRecorder.startRecording();
   if (!started)
@@ -789,7 +1242,7 @@ void Controller::send() {
                         state == "delivered" || state == "read";
             if (gen == m_generation) {
               if (!m_history)
-                m_messages.mergeTail({msg.toVariantMap()});
+                m_messages.mergeTail({sanitizeProfileMediaUrls(msg.toVariantMap()).toMap()});
               if (safe && version == m_draftVersion && m_draft == text) {
                 m_draft.clear();
                 ++m_draftVersion;
@@ -816,7 +1269,8 @@ void Controller::send() {
 }
 void Controller::saveTheme(bool dark) { QSettings().setValue("dark", dark); }
 void Controller::downloadMessage(const QString &id) {
-  if (m_id.isEmpty() || id.isEmpty() || m_mediaBusy.value(id, false))
+  if (m_id.isEmpty() || id.isEmpty() || m_mediaBusy.value(id, false) ||
+      (m_liveMode && !m_profileViewReady))
     return;
   const int row = m_messages.indexOf(id);
   if (row < 0)
@@ -826,7 +1280,9 @@ void Controller::downloadMessage(const QString &id) {
   if (attachment.isEmpty())
     return;
   const auto state = attachment.value("state").toString();
-  if (state == "ready" && QUrl(attachment.value("url").toString()).isLocalFile())
+  const QUrl cachedUrl(attachment.value("url").toString());
+  if (state == "ready" && cachedUrl.isLocalFile() &&
+      isActiveProfileMediaFile(cachedUrl.toLocalFile()))
     return;
   const auto chat = m_id;
   const int generation = m_generation;
@@ -857,7 +1313,8 @@ void Controller::downloadMessage(const QString &id) {
       emit messagesChanged();
       return;
     }
-    const auto message = value.toObject().value("message").toObject().toVariantMap();
+    const auto message = sanitizeProfileMediaUrls(
+        value.toObject().value("message").toObject().toVariantMap()).toMap();
     if (message.value("chat_id").toString() != chat || message.value("id").toString() != id)
       return;
     m_messages.mergeTail({message});
@@ -873,7 +1330,8 @@ void Controller::openAttachment(const QString &id) {
   if (attachment.value("state").toString() != "ready" || !url.isLocalFile())
     return;
   const QFileInfo file(url.toLocalFile());
-  if (!file.exists() || !file.isFile())
+  if (!file.exists() || !file.isFile() ||
+      !isActiveProfileMediaFile(url.toLocalFile()))
     return;
   QDesktopServices::openUrl(url);
 }
@@ -969,6 +1427,11 @@ QString Controller::messageStatusDescription(const QString &status) const {
 void Controller::connectLive() {
   if (m_demo)
     return;
+  if (!m_profileViewReady) {
+    m_error = QStringLiteral("The encrypted profile view must be verified before connecting.");
+    emit stateChanged();
+    return;
+  }
   request("auth.connect", {}, [this](QJsonValue, QJsonObject e) {
     if (!e.isEmpty())
       m_error = e.value("message").toString();
